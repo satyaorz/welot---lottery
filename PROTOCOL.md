@@ -34,7 +34,7 @@ Traditional lotteries require you to pay for tickets that have no value if you l
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │                   Epoch Manager                       │  │
 │  │  • Weekly epochs (Friday noon UTC)                   │  │
-│  │  • Chainlink Automation integration                  │  │
+│  │  • Keeper-based automation integration               │  │
 │  │  • Pyth Entropy randomness                          │  │
 │  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
@@ -79,9 +79,9 @@ Week 1                    Week 2
     Winner selected             Winner selected
 ```
 
-### 2. Chainlink Automation
+### 2. Automation / Keepers
 
-The contract implements `AutomationCompatibleInterface`:
+The contract implements a `checkUpkeep`/`performUpkeep` flow compatible with Chainlink-style automation, but on Mantle you may need to run a keeper off-chain (cron + relayer, Gelato, Defender, etc.).
 
 ```solidity
 function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory) {
@@ -93,7 +93,7 @@ function performUpkeep(bytes calldata) external {
 }
 ```
 
-Register the contract with Chainlink Automation for trustless execution.
+Run a keeper that periodically calls `checkUpkeep` and submits `performUpkeep(performData)` when `upkeepNeeded` is true.
 
 ### 3. Pyth Entropy Randomness
 
@@ -223,7 +223,7 @@ await vault.write.withdraw([tokenAddress, amount])
 ### Automation Setup
 
 1. Deploy WelotVault
-2. Register with Chainlink Automation
+2. Configure your keeper
 3. Fund the Automation subscription
 4. Contract auto-executes weekly draws
 

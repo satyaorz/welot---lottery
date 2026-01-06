@@ -897,11 +897,17 @@ export default function AppPage() {
       <main className="relative mx-auto w-full max-w-6xl px-6 pt-6 pb-10">
         {/* Compact top bar: logo left, wallet controls right */}
         <div className="mb-6 flex items-center justify-between">
-          <div>
+          <div className="flex items-center gap-3">
             <Link href="/" className="flex items-center">
               <div className="we-card rounded-2xl border-2 border-black bg-white p-2 shadow-[4px_4px_0_0_#000]">
                 <Image src="/brand/logo.png" alt="welot" width={60} height={60} priority />
               </div>
+            </Link>
+            <Link 
+              href="/simulation" 
+              className="rounded-xl border-2 border-black bg-amber-100 px-3 py-1.5 text-xs font-black shadow-[2px_2px_0_0_#000] hover:bg-amber-200 transition-colors"
+            >
+              🧪 Simulation
             </Link>
           </div>
           <div>

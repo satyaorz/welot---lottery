@@ -1,0 +1,88 @@
+name: Keeper
+
+on:
+  schedule:
+    # Run every Friday at 12:05 UTC (5 minutes after draw time to allow for block propagation)
+    - cron: '5 12 * * 5'
+  workflow_dispatch:
+    inputs:
+      once:
+        description: 'Run single tick only'
+        required: false
+        default: 'true'
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  keeper:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: cd frontend && npm ci
+
+      - name: Run keeper
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          CHAIN_ID: ${{ secrets.CHAIN_ID }}
+          WELOT_VAULT: ${{ secrets.WELOT_VAULT }}
+          PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
+          ONCE: '1'
+        run: cd frontend && npm run keeper
+
+      # Optional: Run mock entropy fulfill for testnet (if using MockEntropyV2)
+      - name: Fulfill mock entropy (testnet only)
+        if: ${{ secrets.MOCK_ENTROPY != '' }}
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
+          MOCK_ENTROPY: ${{ secrets.MOCK_ENTROPY }}
+          WELOT_VAULT: ${{ secrets.WELOT_VAULT }}
+        run: |
+          cd frontend
+          node -e "
+          const { createPublicClient, createWalletClient, http, parseAbi } = require('viem');
+          const { privateKeyToAccount } = require('viem/accounts');
+          
+          const abi = parseAbi([
+            'function epochs(uint256) view returns (uint64,uint64,uint8,uint64,bytes32,uint256,uint256)',
+            'function currentEpochId() view returns (uint256)',
+            'function fulfill(uint64,bytes32)',
+          ]);
+          
+          const account = privateKeyToAccount(process.env.PRIVATE_KEY);
+          const client = createPublicClient({ transport: http(process.env.RPC_URL) });
+          const wallet = createWalletClient({ account, transport: http(process.env.RPC_URL) });
+          
+          (async () => {
+            const epochId = await client.readContract({ address: process.env.WELOT_VAULT, abi, functionName: 'currentEpochId' });
+            const epoch = await client.readContract({ address: process.env.WELOT_VAULT, abi, functionName: 'epochs', args: [epochId] });
+            const seq = epoch[3];
+            if (seq > 0n) {
+              const randomBytes = '0x' + require('crypto').randomBytes(32).toString('hex');
+              const hash = await wallet.writeContract({ address: process.env.MOCK_ENTROPY, abi, functionName: 'fulfill', args: [seq, randomBytes] });
+              console.log('Fulfilled entropy:', hash);
+            }
+          })();
+          "
+
+      # Run keeper again to finalize if randomness was fulfilled
+      - name: Finalize draw (after entropy)
+        if: ${{ secrets.MOCK_ENTROPY != '' }}
+        env:
+          RPC_URL: ${{ secrets.RPC_URL }}
+          CHAIN_ID: ${{ secrets.CHAIN_ID }}
+          WELOT_VAULT: ${{ secrets.WELOT_VAULT }}
+          PRIVATE_KEY: ${{ secrets.KEEPER_PRIVATE_KEY }}
+          ONCE: '1'
+        run: cd frontend && npm run keeper

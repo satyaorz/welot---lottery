@@ -4,7 +4,6 @@ pragma solidity ^0.8.19;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {AutomationCompatibleInterface} from "@chainlink/v0.8/automation/interfaces/AutomationCompatibleInterface.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
@@ -14,10 +13,10 @@ import {IEntropyV2, IEntropyConsumer} from "./interfaces/IEntropyV2.sol";
 
 /// @title WelotVault
 /// @notice No-loss savings lottery: deposit stablecoins, earn lottery tickets, win yield prizes.
-///         Integrated with Chainlink Automation for automatic weekly draws.
 ///         Uses Pyth Entropy for verifiable randomness on Mantle Network.
+///         Draw execution can be automated by an off-chain keeper calling `checkUpkeep`/`performUpkeep`.
 /// @dev Supports multiple deposit tokens via separate vaults
-contract WelotVault is ReentrancyGuard, Pausable, Ownable, AutomationCompatibleInterface, IEntropyConsumer {
+contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     using SafeERC20 for IERC20;
 
     // ══════════════════════════════════════════════════════════════════════════════
@@ -98,7 +97,7 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, AutomationCompatibleI
     // Entropy request tracking
     mapping(uint64 => uint256) public entropyRequestToEpoch;
 
-    // Chainlink Automation forwarder
+    // Optional keeper forwarder (if set, only this address can call performUpkeep)
     address public automationForwarder;
 
     // ══════════════════════════════════════════════════════════════════════════════
@@ -152,9 +151,10 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, AutomationCompatibleI
         // Initialize first epoch
         currentEpochId = 1;
         uint64 start = uint64(block.timestamp);
+        uint64 end = _getNextDrawTime();
         epochs[currentEpochId] = Epoch({
             start: start,
-            end: start + drawInterval,
+            end: end,
             status: EpochStatus.Open,
             entropySequence: 0,
             randomness: bytes32(0),
@@ -336,6 +336,20 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, AutomationCompatibleI
         }
         uint256 nextFriday = (currentTime / 1 days + daysUntilFriday) * 1 days + DRAW_HOUR * 1 hours;
         return uint64(nextFriday);
+    }
+
+    /// @notice Get next draw time based on drawInterval
+    /// @dev For weekly draws uses Friday noon, otherwise uses interval-aligned boundaries
+    function _getNextDrawTime() internal view returns (uint64) {
+        // If drawInterval is 7 days (604800 seconds), use Friday noon scheduling
+        if (drawInterval == 7 days) {
+            return getNextFridayNoon();
+        }
+        // Otherwise use interval-aligned boundaries (for testing with shorter intervals)
+        uint64 from = uint64(block.timestamp);
+        uint64 remainder = from % drawInterval;
+        if (remainder == 0) return from + drawInterval;
+        return from + (drawInterval - remainder);
     }
 
     function _pendingPrize(address token, uint256 poolId, address user) internal view returns (uint256) {
@@ -520,10 +534,10 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, AutomationCompatibleI
     }
 
     // ══════════════════════════════════════════════════════════════════════════════
-    // CHAINLINK AUTOMATION
+    // AUTOMATION / KEEPERS
     // ══════════════════════════════════════════════════════════════════════════════
 
-    function checkUpkeep(bytes calldata) external view override returns (bool upkeepNeeded, bytes memory performData) {
+    function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory performData) {
         Epoch storage e = epochs[currentEpochId];
 
         if (e.status == EpochStatus.Open && block.timestamp >= e.end) {
@@ -541,7 +555,7 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, AutomationCompatibleI
         return (false, "");
     }
 
-    function performUpkeep(bytes calldata performData) external override {
+    function performUpkeep(bytes calldata performData) external {
         if (automationForwarder != address(0) && msg.sender != automationForwarder) {
             revert NotAutomationForwarder();
         }
@@ -603,6 +617,7 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, AutomationCompatibleI
 
     /// @notice Entropy callback - MUST NOT REVERT
     function entropyCallback(uint64 sequenceNumber, address /*provider*/, bytes32 randomNumber) external override {
+        if (msg.sender != address(entropy)) return;
         uint256 epochId = entropyRequestToEpoch[sequenceNumber];
         if (epochId == 0) return;
 
@@ -645,10 +660,10 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, AutomationCompatibleI
 
         emit WinnerSelected(currentEpochId, winningPoolId, totalPrize);
 
-        // Start next epoch - target next Friday noon
+        // Start next epoch - Friday noon for production, interval-aligned for testing
         uint256 nextEpochId = currentEpochId + 1;
-        uint64 nextEnd = getNextFridayNoon();
         uint64 nextStart = uint64(block.timestamp);
+        uint64 nextEnd = _getNextDrawTime();
 
         currentEpochId = nextEpochId;
         epochs[nextEpochId] = Epoch({

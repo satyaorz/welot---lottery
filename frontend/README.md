@@ -44,7 +44,24 @@ Open http://localhost:3000
 - **Multi-token support**: Deposit USDe, USDC, mETH, or any configured token
 - **Token selector**: Choose which token pool to participate in
 - **Weekly draws**: Automated prize distribution every Friday at noon UTC
-- **Chainlink Automation**: Decentralized, trustless draw execution
+- **Automation**: Keeper-based draw execution (cron/relayer, Gelato, Defender, etc.)
+
+## Keeper (Mantle)
+
+This repo includes an off-chain keeper that calls `checkUpkeep` and then submits `performUpkeep(performData)` when needed.
+
+```bash
+cd frontend
+
+export RPC_URL=https://rpc.sepolia.mantle.xyz
+export CHAIN_ID=5003
+export WELOT_VAULT=0xYourVault
+export PRIVATE_KEY=0xyour_keeper_private_key
+
+npm run keeper
+```
+
+The contract aligns 2-hour epochs to UTC even-hour boundaries (00:00, 02:00, 04:00, ...). The keeper can poll frequently (e.g. every 30s) and will only send a tx when `upkeepNeeded=true`.
 - **Pyth Entropy**: Verifiable on-chain randomness for fair winner selection
 - **Real-time stats**: See pool totals, your tickets, and claimable prizes
 
