@@ -1,54 +1,26 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.19;
 
-import {IERC20} from "../interfaces/IERC20.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-/// @notice Mintable ERC20 mock for localhost development.
-/// @dev Intentionally simple; `mint` is permissionless to act as a faucet.
-contract MockERC20 is IERC20 {
-    string public override name;
-    string public override symbol;
-    uint8 public override decimals;
+/// @title MockERC20
+/// @notice Simple mintable ERC20 for testing
+contract MockERC20 is ERC20 {
+    uint8 private immutable _decimals;
 
-    uint256 public override totalSupply;
+    constructor(string memory name_, string memory symbol_, uint8 decimals_) ERC20(name_, symbol_) {
+        _decimals = decimals_;
+    }
 
-    mapping(address => uint256) public override balanceOf;
-    mapping(address => mapping(address => uint256)) public override allowance;
-
-    constructor(string memory name_, string memory symbol_, uint8 decimals_) {
-        name = name_;
-        symbol = symbol_;
-        decimals = decimals_;
+    function decimals() public view override returns (uint8) {
+        return _decimals;
     }
 
     function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-        totalSupply += amount;
+        _mint(to, amount);
     }
 
-    function approve(address spender, uint256 amount) external override returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transfer(address to, uint256 amount) external override returns (bool) {
-        _transfer(msg.sender, to, amount);
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external override returns (bool) {
-        uint256 allowed = allowance[from][msg.sender];
-        require(allowed >= amount, "ALLOW");
-        if (allowed != type(uint256).max) {
-            allowance[from][msg.sender] = allowed - amount;
-        }
-        _transfer(from, to, amount);
-        return true;
-    }
-
-    function _transfer(address from, address to, uint256 amount) internal {
-        require(balanceOf[from] >= amount, "BAL");
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
+    function burn(address from, uint256 amount) external {
+        _burn(from, amount);
     }
 }

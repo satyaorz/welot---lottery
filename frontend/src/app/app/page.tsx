@@ -6,13 +6,103 @@ import { useEffect, useState, useCallback } from "react";
 import type { Address, EIP1193Provider } from "viem";
 import { formatUnits, maxUint256, parseUnits } from "viem";
 
-import { erc20Abi, mockErc20FaucetAbi, mockErc4626FaucetAbi, welotVaultAbi } from "@/lib/abis";
-import { getPublicClient, getWalletClient, shortAddr } from "@/lib/clients";
-import { CONFIG } from "@/lib/config";
+import { erc20Abi, faucetAbi, mockErc4626FaucetAbi, welotVaultAbi } from "@/lib/abis";
+import { getPublicClient, getWalletClient, shortAddr, getExplorerUrl } from "@/lib/clients";
+import { CONFIG, getConfiguredTokens, type TokenInfo } from "@/lib/config";
+import { getChain } from "@/lib/chains";
+
+type InjectedProvider = EIP1193Provider & {
+  request: (args: { method: string; params?: unknown[] | Record<string, unknown> }) => Promise<unknown>;
+  providers?: InjectedProvider[];
+  isMetaMask?: boolean;
+  isRabby?: boolean;
+  isCoinbaseWallet?: boolean;
+};
+
+function getInjectedProviders(): InjectedProvider[] {
+  const eth = (globalThis as unknown as { ethereum?: unknown }).ethereum;
+  if (!eth) return [];
+  const maybeProvider = eth as Partial<InjectedProvider>;
+  const providers = Array.isArray(maybeProvider.providers)
+    ? (maybeProvider.providers as InjectedProvider[])
+    : [eth as InjectedProvider];
+
+  // Filter out obviously invalid entries
+  return providers.filter((p) => typeof (p as InjectedProvider).request === "function");
+}
+
+function providerScore(p: InjectedProvider): number {
+  // Prefer common wallets first; this avoids buggy/unknown injected providers.
+  if (p.isMetaMask) return 100;
+  if (p.isRabby) return 90;
+  if (p.isCoinbaseWallet) return 80;
+  return 10;
+}
+
+function getErrorMessage(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object") {
+    const rec = err as Record<string, unknown>;
+    const shortMessage = rec["shortMessage"];
+    if (typeof shortMessage === "string" && shortMessage.trim()) return shortMessage;
+    const message = rec["message"];
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return String(err);
+}
+
+function safeParseUnits(value: string, decimals: number): bigint | null {
+  if (!value) return 0n;
+  try {
+    return parseUnits(value, decimals);
+  } catch {
+    return null;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// TYPES
+// ════════════════════════════════════════════════════════════════════════════
+
+interface TokenState {
+  balance: bigint;
+  allowance: bigint;
+  deposits: bigint;
+  claimable: bigint;
+  prizePool: bigint;
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // COMPONENTS
 // ════════════════════════════════════════════════════════════════════════════
+
+function TokenSelector({
+  tokens,
+  selected,
+  onSelect,
+}: {
+  tokens: TokenInfo[];
+  selected: TokenInfo | null;
+  onSelect: (token: TokenInfo) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {tokens.map((token) => (
+        <button
+          key={token.address}
+          onClick={() => onSelect(token)}
+          className={`rounded-xl border-2 border-black px-4 py-2 text-sm font-black transition-all ${
+            selected?.address === token.address
+              ? "bg-zinc-950 text-white shadow-[3px_3px_0_0_#000]"
+              : "bg-white text-zinc-950 hover:bg-zinc-100"
+          }`}
+        >
+          {token.symbol}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function Header({
   connected,
@@ -178,17 +268,21 @@ export default function AppPage() {
   // Wallet state
   const [connected, setConnected] = useState(false);
   const [address, setAddress] = useState<Address | undefined>(undefined);
+  const [walletProvider, setWalletProvider] = useState<InjectedProvider | undefined>(undefined);
 
-  // Contract state
-  const [decimals, setDecimals] = useState(18);
-  const [balance, setBalance] = useState(0n);
-  const [allowance, setAllowance] = useState(0n);
-  const [deposits, setDeposits] = useState(0n);
-  const [claimable, setClaimable] = useState(0n);
+  // Available tokens
+  const [availableTokens, setAvailableTokens] = useState<TokenInfo[]>([]);
+  const [selectedToken, setSelectedToken] = useState<TokenInfo | null>(null);
+  
+  // Token-specific state
+  const [tokenStates, setTokenStates] = useState<Record<string, TokenState>>({});
+
+  // Global state
   const [totalDeposits, setTotalDeposits] = useState(0n);
   const [prizePool, setPrizePool] = useState(0n);
   const [timeUntilDraw, setTimeUntilDraw] = useState(0);
   const [epochStatus, setEpochStatus] = useState(0);
+  const [epochEndTime, setEpochEndTime] = useState<number>(0);
 
   // UI state
   const [depositAmount, setDepositAmount] = useState("");
@@ -196,21 +290,121 @@ export default function AppPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [mounted, setMounted] = useState(false);
 
-  const configOk = Boolean(CONFIG.vaultAddress && CONFIG.usdeAddress);
-  const faucetOk = Boolean(CONFIG.usdeAddress && CONFIG.susdeAddress);
-  const needsApproval = allowance < parseUnits(depositAmount || "0", decimals);
+  const configOk = Boolean(CONFIG.vaultAddress);
+  const faucetOk = Boolean(CONFIG.faucetAddress);
+  const chain = getChain();
+  const isLocalhost = chain.id === 31337;
+
+  // Current token state
+  const currentState = selectedToken ? tokenStates[selectedToken.address] : null;
+  const depositParsed = selectedToken ? safeParseUnits(depositAmount, selectedToken.decimals) : null;
+  const withdrawParsed = selectedToken ? safeParseUnits(withdrawAmount, selectedToken.decimals) : null;
+
+  const insufficientBalance =
+    Boolean(selectedToken && currentState) &&
+    depositParsed !== null &&
+    depositParsed > 0n &&
+    currentState!.balance < depositParsed;
+
+  const insufficientDeposits =
+    Boolean(selectedToken && currentState) &&
+    withdrawParsed !== null &&
+    withdrawParsed > 0n &&
+    currentState!.deposits < withdrawParsed;
+
+  const needsApproval = currentState && selectedToken
+    ? depositParsed !== null && depositParsed > 0n
+      ? currentState.allowance < depositParsed
+      : false
+    : false;
 
   const formatAmount = useCallback(
-    (amount: bigint) => {
+    (amount: bigint, decimals: number = 18) => {
       const formatted = formatUnits(amount, decimals);
       const num = parseFloat(formatted);
       if (num === 0) return "0";
       if (num < 0.01) return "<0.01";
       return num.toLocaleString(undefined, { maximumFractionDigits: 2 });
     },
-    [decimals]
+    []
   );
+
+  // Load available tokens from contract
+  const loadTokens = useCallback(async () => {
+    if (!configOk) {
+      // If the main vault address isn't configured yet, fall back to the static
+      // token list in `config.ts` so the TokenSelector is still usable in dev.
+      const configuredTokens = getConfiguredTokens();
+      setAvailableTokens(configuredTokens);
+      if (configuredTokens.length > 0 && !selectedToken) {
+        setSelectedToken(configuredTokens[0]);
+      }
+      return;
+    }
+
+    try {
+      const publicClient = getPublicClient();
+      
+      // Get number of supported tokens
+      const len = await publicClient.readContract({
+        address: CONFIG.vaultAddress!,
+        abi: welotVaultAbi,
+        functionName: "supportedTokensLength",
+      });
+
+      const tokens: TokenInfo[] = [];
+      for (let i = 0n; i < len; i++) {
+        const tokenAddr = await publicClient.readContract({
+          address: CONFIG.vaultAddress!,
+          abi: welotVaultAbi,
+          functionName: "getSupportedToken",
+          args: [i],
+        });
+
+        const config = await publicClient.readContract({
+          address: CONFIG.vaultAddress!,
+          abi: welotVaultAbi,
+          functionName: "tokenConfigs",
+          args: [tokenAddr],
+        });
+
+        // Get token symbol
+        let symbol = "TOKEN";
+        try {
+          const symbolResult = await publicClient.readContract({
+            address: tokenAddr,
+            abi: [{ type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ type: "string" }] }],
+            functionName: "symbol",
+          });
+          symbol = symbolResult;
+        } catch {}
+
+        tokens.push({
+          address: tokenAddr,
+          symbol,
+          name: symbol,
+          decimals: config[2], // decimals from tokenConfigs
+          icon: `/icons/${symbol.toLowerCase()}.svg`,
+          vaultAddress: config[1] as Address, // yieldVault from tokenConfigs
+        });
+      }
+
+      setAvailableTokens(tokens);
+      if (tokens.length > 0 && !selectedToken) {
+        setSelectedToken(tokens[0]);
+      }
+    } catch (err) {
+      console.error("Load tokens error:", err);
+      // Fallback to configured tokens
+      const configuredTokens = getConfiguredTokens();
+      setAvailableTokens(configuredTokens);
+      if (configuredTokens.length > 0 && !selectedToken) {
+        setSelectedToken(configuredTokens[0]);
+      }
+    }
+  }, [configOk, selectedToken]);
 
   const refresh = useCallback(async () => {
     if (!configOk) return;
@@ -218,30 +412,29 @@ export default function AppPage() {
     try {
       const publicClient = getPublicClient();
 
-      const [dec, pot, total, epochId] = await Promise.all([
+      const [pot, total, epochId, timeLeft] = await Promise.all([
         publicClient.readContract({
-          address: CONFIG.usdeAddress!,
-          abi: erc20Abi,
-          functionName: "decimals",
+          address: CONFIG.vaultAddress!,
+          abi: welotVaultAbi,
+          functionName: "currentPrizePoolTotal",
         }),
         publicClient.readContract({
           address: CONFIG.vaultAddress!,
           abi: welotVaultAbi,
-          functionName: "prizePot",
-        }),
-        publicClient.readContract({
-          address: CONFIG.vaultAddress!,
-          abi: welotVaultAbi,
-          functionName: "totalPrincipal",
+          functionName: "totalDepositsNormalized",
         }),
         publicClient.readContract({
           address: CONFIG.vaultAddress!,
           abi: welotVaultAbi,
           functionName: "currentEpochId",
         }),
+        publicClient.readContract({
+          address: CONFIG.vaultAddress!,
+          abi: welotVaultAbi,
+          functionName: "getTimeUntilDraw",
+        }),
       ]);
 
-      setDecimals(Number(dec));
       setPrizePool(pot);
       setTotalDeposits(total);
 
@@ -254,58 +447,97 @@ export default function AppPage() {
       });
 
       const endTime = Number(epoch[1]);
-      const now = Math.floor(Date.now() / 1000);
-      setTimeUntilDraw(Math.max(0, endTime - now));
+      setEpochEndTime(endTime);
+      setTimeUntilDraw(Math.max(0, Number(timeLeft)));
       setEpochStatus(Number(epoch[2]));
 
-      // User-specific data
-      if (address) {
+      // User-specific data for each token
+      if (address && availableTokens.length > 0) {
+        const newStates: Record<string, TokenState> = {};
+        
         // Get first pool ID
-        const len = await publicClient.readContract({
+        const poolLen = await publicClient.readContract({
           address: CONFIG.vaultAddress!,
           abi: welotVaultAbi,
-          functionName: "podIdsLength",
+          functionName: "poolIdsLength",
         });
 
-        if (Number(len) > 0) {
-          const poolId = await publicClient.readContract({
+        let poolId = 1n;
+        if (Number(poolLen) > 0) {
+          poolId = await publicClient.readContract({
             address: CONFIG.vaultAddress!,
             abi: welotVaultAbi,
-            functionName: "podIds",
+            functionName: "poolIds",
             args: [0n],
           });
-
-          const [pos, bal, allow] = await Promise.all([
-            publicClient.readContract({
-              address: CONFIG.vaultAddress!,
-              abi: welotVaultAbi,
-              functionName: "getUserPosition",
-              args: [poolId, address],
-            }),
-            publicClient.readContract({
-              address: CONFIG.usdeAddress!,
-              abi: erc20Abi,
-              functionName: "balanceOf",
-              args: [address],
-            }),
-            publicClient.readContract({
-              address: CONFIG.usdeAddress!,
-              abi: erc20Abi,
-              functionName: "allowance",
-              args: [address, CONFIG.vaultAddress!],
-            }),
-          ]);
-
-          setDeposits(pos[0]);
-          setClaimable(pos[1]);
-          setBalance(bal);
-          setAllowance(allow);
         }
+
+        for (const token of availableTokens) {
+          try {
+            const [pos, balance, allowance, tokenPrize] = await Promise.all([
+              publicClient.readContract({
+                address: CONFIG.vaultAddress!,
+                abi: welotVaultAbi,
+                functionName: "getUserPosition",
+                args: [token.address, poolId, address],
+              }),
+              publicClient.readContract({
+                address: token.address,
+                abi: erc20Abi,
+                functionName: "balanceOf",
+                args: [address],
+              }),
+              publicClient.readContract({
+                address: token.address,
+                abi: erc20Abi,
+                functionName: "allowance",
+                args: [address, CONFIG.vaultAddress!],
+              }),
+              publicClient.readContract({
+                address: CONFIG.vaultAddress!,
+                abi: welotVaultAbi,
+                functionName: "currentPrizePool",
+                args: [token.address],
+              }),
+            ]);
+
+            newStates[token.address] = {
+              deposits: pos[0],
+              claimable: pos[1],
+              balance,
+              allowance,
+              prizePool: tokenPrize,
+            };
+          } catch (err) {
+            console.error(`Error loading ${token.symbol}:`, err);
+          }
+        }
+        
+        setTokenStates(newStates);
       }
     } catch (err) {
       console.error("Refresh error:", err);
     }
-  }, [configOk, address]);
+  }, [configOk, address, availableTokens]);
+
+  const nextDrawUtc = useCallback(() => {
+    if (!epochEndTime) return "";
+    try {
+      return new Date(epochEndTime * 1000).toUTCString();
+    } catch {
+      return "";
+    }
+  }, [epochEndTime]);
+
+  // Load tokens on mount
+  useEffect(() => {
+    void loadTokens();
+  }, [loadTokens]);
+
+  // Mark client mounted to avoid SSR/CSR hydration mismatches for env-dependent UI
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Timer for countdown
   useEffect(() => {
@@ -356,61 +588,74 @@ export default function AppPage() {
 
   async function connectWallet() {
     setError("");
-    let eth = (globalThis as { ethereum?: EIP1193Provider | any }).ethereum;
-    if (!eth) {
+    const providers = getInjectedProviders().sort((a, b) => providerScore(b) - providerScore(a));
+    if (providers.length === 0) {
       setError("Please install a wallet like MetaMask");
       return;
     }
 
-    // If multiple injected providers exist (other extensions), prefer MetaMask if available
-    try {
-      if ((eth as any).providers && Array.isArray((eth as any).providers)) {
-        const providers: any[] = (eth as any).providers;
-        const mm = providers.find((p) => p.isMetaMask) || providers[0];
-        eth = mm;
+    let lastErr: unknown;
+    for (const eth of providers) {
+      try {
+        const result = await eth.request({ method: "eth_requestAccounts" });
+        const accounts = Array.isArray(result) ? (result as string[]) : [];
+        setAddress(accounts?.[0] as Address | undefined);
+        setConnected(Boolean(accounts?.[0]));
+        setWalletProvider(eth);
+        await refresh();
+        return;
+      } catch (err: unknown) {
+        lastErr = err;
+        // Try next provider
       }
-
-      const accounts: string[] = await eth.request({ method: "eth_requestAccounts" });
-      setAddress(accounts?.[0] as Address | undefined);
-      setConnected(Boolean(accounts?.[0]));
-      await refresh();
-    } catch (err: any) {
-      console.error("connectWallet error:", err);
-      const msg = err?.message ?? String(err);
-      setError(msg || "Failed to connect wallet");
     }
+
+    // If all providers failed, surface the last error message.
+    console.error("connectWallet error:", lastErr);
+    const msg = (lastErr as { message?: string } | undefined)?.message ?? String(lastErr);
+    setError(msg || "Failed to connect wallet");
   }
 
   function disconnectWallet() {
     setConnected(false);
     setAddress(undefined);
-    setDeposits(0n);
-    setClaimable(0n);
-    setBalance(0n);
-    setAllowance(0n);
+    setWalletProvider(undefined);
+    setTokenStates({});
+  }
+
+  function requireWalletProvider(): InjectedProvider | undefined {
+    if (!walletProvider) {
+      setError("Wallet not connected");
+      return undefined;
+    }
+    return walletProvider;
   }
 
   async function approve() {
-    if (!connected || !address || !configOk) return;
+    if (!connected || !address || !configOk || !selectedToken) return;
     setLoading(true);
     setError("");
 
     try {
-      const eth = (globalThis as { ethereum?: EIP1193Provider }).ethereum!;
+      const eth = requireWalletProvider();
+      if (!eth) return;
+      const publicClient = getPublicClient();
       const walletClient = getWalletClient(eth);
 
-      await walletClient.writeContract({
-        address: CONFIG.usdeAddress!,
+      const hash = await walletClient.writeContract({
+        address: selectedToken.address,
         abi: erc20Abi,
         functionName: "approve",
         args: [CONFIG.vaultAddress!, maxUint256],
         account: address,
       });
 
-      setSuccess("Approved!");
+      await publicClient.waitForTransactionReceipt({ hash });
+
+      setSuccess(`Approved ${selectedToken.symbol}!`);
       await refresh();
     } catch (err) {
-      setError("Approval failed");
+      setError(getErrorMessage(err));
       console.error(err);
     } finally {
       setLoading(false);
@@ -418,37 +663,41 @@ export default function AppPage() {
   }
 
   async function deposit() {
-    if (!connected || !address || !configOk || !depositAmount) return;
+    if (!connected || !address || !configOk || !depositAmount || !selectedToken) return;
     setLoading(true);
     setError("");
 
     try {
-      const eth = (globalThis as { ethereum?: EIP1193Provider }).ethereum!;
-      const walletClient = getWalletClient(eth);
-      const amount = parseUnits(depositAmount, decimals);
-
-      // Get first pool
+      const eth = requireWalletProvider();
+      if (!eth) return;
       const publicClient = getPublicClient();
-      const poolId = await publicClient.readContract({
-        address: CONFIG.vaultAddress!,
-        abi: welotVaultAbi,
-        functionName: "podIds",
-        args: [0n],
-      });
+      const walletClient = getWalletClient(eth);
+      const amount = depositParsed;
+      if (amount === null || amount === 0n) {
+        setError("Enter a valid deposit amount");
+        return;
+      }
 
-      await walletClient.writeContract({
+      if ((currentState?.balance ?? 0n) < amount) {
+        setError(`Insufficient ${selectedToken.symbol} balance. Use Test Mode to claim tokens first.`);
+        return;
+      }
+
+      const hash = await walletClient.writeContract({
         address: CONFIG.vaultAddress!,
         abi: welotVaultAbi,
         functionName: "deposit",
-        args: [amount, poolId],
+        args: [selectedToken.address, amount],
         account: address,
       });
 
+      await publicClient.waitForTransactionReceipt({ hash });
+
       setDepositAmount("");
-      setSuccess("Deposit successful!");
+      setSuccess(`Deposited ${depositAmount} ${selectedToken.symbol}!`);
       await refresh();
     } catch (err) {
-      setError("Deposit failed");
+      setError(getErrorMessage(err));
       console.error(err);
     } finally {
       setLoading(false);
@@ -456,36 +705,41 @@ export default function AppPage() {
   }
 
   async function withdraw() {
-    if (!connected || !address || !configOk || !withdrawAmount) return;
+    if (!connected || !address || !configOk || !withdrawAmount || !selectedToken) return;
     setLoading(true);
     setError("");
 
     try {
-      const eth = (globalThis as { ethereum?: EIP1193Provider }).ethereum!;
-      const walletClient = getWalletClient(eth);
-      const amount = parseUnits(withdrawAmount, decimals);
-
+      const eth = requireWalletProvider();
+      if (!eth) return;
       const publicClient = getPublicClient();
-      const poolId = await publicClient.readContract({
-        address: CONFIG.vaultAddress!,
-        abi: welotVaultAbi,
-        functionName: "podIds",
-        args: [0n],
-      });
+      const walletClient = getWalletClient(eth);
+      const amount = withdrawParsed;
+      if (amount === null || amount === 0n) {
+        setError("Enter a valid withdraw amount");
+        return;
+      }
 
-      await walletClient.writeContract({
+      if ((currentState?.deposits ?? 0n) < amount) {
+        setError(`Insufficient deposited ${selectedToken.symbol} to withdraw that amount.`);
+        return;
+      }
+
+      const hash = await walletClient.writeContract({
         address: CONFIG.vaultAddress!,
         abi: welotVaultAbi,
         functionName: "withdraw",
-        args: [amount, poolId],
+        args: [selectedToken.address, amount],
         account: address,
       });
 
+      await publicClient.waitForTransactionReceipt({ hash });
+
       setWithdrawAmount("");
-      setSuccess("Withdrawal successful!");
+      setSuccess(`Withdrew ${withdrawAmount} ${selectedToken.symbol}!`);
       await refresh();
     } catch (err) {
-      setError("Withdrawal failed");
+      setError(getErrorMessage(err));
       console.error(err);
     } finally {
       setLoading(false);
@@ -493,34 +747,30 @@ export default function AppPage() {
   }
 
   async function claim() {
-    if (!connected || !address || !configOk) return;
+    if (!connected || !address || !configOk || !selectedToken) return;
     setLoading(true);
     setError("");
 
     try {
-      const eth = (globalThis as { ethereum?: EIP1193Provider }).ethereum!;
+      const eth = requireWalletProvider();
+      if (!eth) return;
+      const publicClient = getPublicClient();
       const walletClient = getWalletClient(eth);
 
-      const publicClient = getPublicClient();
-      const poolId = await publicClient.readContract({
-        address: CONFIG.vaultAddress!,
-        abi: welotVaultAbi,
-        functionName: "podIds",
-        args: [0n],
-      });
-
-      await walletClient.writeContract({
+      const hash = await walletClient.writeContract({
         address: CONFIG.vaultAddress!,
         abi: welotVaultAbi,
         functionName: "claimPrize",
-        args: [poolId, address],
+        args: [selectedToken.address],
         account: address,
       });
+
+      await publicClient.waitForTransactionReceipt({ hash });
 
       setSuccess("Prize claimed!");
       await refresh();
     } catch (err) {
-      setError("Claim failed");
+      setError(getErrorMessage(err));
       console.error(err);
     } finally {
       setLoading(false);
@@ -528,26 +778,60 @@ export default function AppPage() {
   }
 
   async function mintTestTokens() {
+    if (!connected || !address || !faucetOk || !selectedToken) return;
+    setLoading(true);
+    setError("");
+
+    try {
+      const eth = requireWalletProvider();
+      if (!eth) return;
+      const publicClient = getPublicClient();
+      const walletClient = getWalletClient(eth);
+
+      const hash = await walletClient.writeContract({
+        address: CONFIG.faucetAddress!,
+        abi: faucetAbi,
+        functionName: "claim",
+        args: [selectedToken.address],
+        account: address,
+      });
+
+      await publicClient.waitForTransactionReceipt({ hash });
+
+      setSuccess(`Claimed 1000 ${selectedToken.symbol}!`);
+      await refresh();
+    } catch (err) {
+      setError(getErrorMessage(err));
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function mintAllTestTokens() {
     if (!connected || !address || !faucetOk) return;
     setLoading(true);
     setError("");
 
     try {
-      const eth = (globalThis as { ethereum?: EIP1193Provider }).ethereum!;
+      const eth = requireWalletProvider();
+      if (!eth) return;
+      const publicClient = getPublicClient();
       const walletClient = getWalletClient(eth);
 
-      await walletClient.writeContract({
-        address: CONFIG.usdeAddress!,
-        abi: mockErc20FaucetAbi,
-        functionName: "mint",
-        args: [address, parseUnits("1000", decimals)],
+      const hash = await walletClient.writeContract({
+        address: CONFIG.faucetAddress!,
+        abi: faucetAbi,
+        functionName: "claimAll",
         account: address,
       });
 
-      setSuccess("Minted 1000 test tokens!");
+      await publicClient.waitForTransactionReceipt({ hash });
+
+      setSuccess("Claimed all available test tokens!");
       await refresh();
     } catch (err) {
-      setError("Mint failed");
+      setError(getErrorMessage(err));
       console.error(err);
     } finally {
       setLoading(false);
@@ -555,44 +839,33 @@ export default function AppPage() {
   }
 
   async function simulateYield() {
-    if (!connected || !address || !faucetOk) return;
+    if (!connected || !address || !selectedToken?.vaultAddress) return;
     setLoading(true);
     setError("");
 
     try {
-      const eth = (globalThis as { ethereum?: EIP1193Provider }).ethereum!;
+      const eth = requireWalletProvider();
+      if (!eth) return;
+      const publicClient = getPublicClient();
       const walletClient = getWalletClient(eth);
-      const amount = parseUnits("50", decimals);
+      const amount = parseUnits("50", selectedToken.decimals);
 
-      // Mint, approve, donate
-      await walletClient.writeContract({
-        address: CONFIG.usdeAddress!,
-        abi: mockErc20FaucetAbi,
-        functionName: "mint",
-        args: [address, amount],
-        account: address,
-      });
-
-      await walletClient.writeContract({
-        address: CONFIG.usdeAddress!,
-        abi: erc20Abi,
-        functionName: "approve",
-        args: [CONFIG.susdeAddress!, amount],
-        account: address,
-      });
-
-      await walletClient.writeContract({
-        address: CONFIG.susdeAddress!,
+      // Local mock: mint yield directly into the vault so prize pool increases without
+      // requiring the user to donate tokens.
+      const yieldHash = await walletClient.writeContract({
+        address: selectedToken.vaultAddress,
         abi: mockErc4626FaucetAbi,
-        functionName: "donateYield",
+        functionName: "simulateYield",
         args: [amount],
         account: address,
       });
 
-      setSuccess("Simulated 50 yield!");
+      await publicClient.waitForTransactionReceipt({ hash: yieldHash });
+
+      setSuccess(`Simulated 50 ${selectedToken.symbol} yield!`);
       await refresh();
     } catch (err) {
-      setError("Yield simulation failed");
+      setError(getErrorMessage(err));
       console.error(err);
     } finally {
       setLoading(false);
@@ -625,11 +898,11 @@ export default function AppPage() {
         {/* Compact top bar: logo left, wallet controls right */}
         <div className="mb-6 flex items-center justify-between">
           <div>
-            <a href="/" className="flex items-center">
+            <Link href="/" className="flex items-center">
               <div className="we-card rounded-2xl border-2 border-black bg-white p-2 shadow-[4px_4px_0_0_#000]">
                 <Image src="/brand/logo.png" alt="welot" width={60} height={60} priority />
               </div>
-            </a>
+            </Link>
           </div>
           <div>
             {connected && address ? (
@@ -687,9 +960,17 @@ export default function AppPage() {
           </div>
         )}
 
-        {!configOk && (
+        {mounted && !configOk && (
           <div className="mb-6 rounded-2xl border-2 border-black bg-amber-100 px-4 py-3 text-sm font-black text-zinc-950 shadow-[4px_4px_0_0_#000]">
-            Contract addresses not configured. Set NEXT_PUBLIC_WELOT_VAULT and NEXT_PUBLIC_USDE in .env.local
+            Contract addresses not configured. Deploy contracts and set NEXT_PUBLIC_WELOT_VAULT in .env.local
+          </div>
+        )}
+
+        {/* Token Selector */}
+        {mounted && availableTokens.length > 0 && (
+          <div className="mb-6">
+            <div className="text-sm font-black text-zinc-950 mb-2">Select Token</div>
+            <TokenSelector tokens={availableTokens} selected={selectedToken} onSelect={setSelectedToken} />
           </div>
         )}
 
@@ -707,10 +988,11 @@ export default function AppPage() {
           <div className="relative z-10 p-9">
           <div className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
             <div>
-              <div className="text-sm font-black text-zinc-950">Current Prize Pool</div>
+              <div className="text-sm font-black text-zinc-950">Total Prize Pool</div>
                   <div className="mt-2 text-5xl font-black text-zinc-950 font-pixel">${formatAmount(prizePool)}</div>
               <div className="mt-2 text-sm font-semibold text-zinc-800">
                 {getEpochStatusText(epochStatus)}
+                {epochEndTime ? ` • Next draw: ${nextDrawUtc()}` : ""}
               </div>
             </div>
             <div className="rounded-2xl border-2 border-black bg-white px-6 py-4 shadow-[6px_6px_0_0_#000]">
@@ -728,22 +1010,22 @@ export default function AppPage() {
           <StatCard
             icon="/icons/moneybag.svg"
             label="Your Deposits"
-            value={`$${formatAmount(deposits)}`}
+            value={`${formatAmount(currentState?.deposits ?? 0n, selectedToken?.decimals ?? 18)} ${selectedToken?.symbol ?? ''}`}
             subtext="Your principal (always withdrawable)"
             color="emerald"
           />
           <StatCard
             icon="/icons/ticket.svg"
             label="Your Tickets"
-            value={formatAmount(deposits)}
-            subtext="1 ticket per $1 deposited"
+            value={formatAmount(currentState?.deposits ?? 0n, selectedToken?.decimals ?? 18)}
+            subtext="1 ticket per token deposited"
             color="amber"
           />
           <StatCard
             icon="/icons/trophy.svg"
             label="Winnings"
-            value={`$${formatAmount(claimable)}`}
-            subtext={claimable > 0n ? "Ready to claim!" : "Win the next draw"}
+            value={`${formatAmount(currentState?.claimable ?? 0n, selectedToken?.decimals ?? 18)} ${selectedToken?.symbol ?? ''}`}
+            subtext={(currentState?.claimable ?? 0n) > 0n ? "Ready to claim!" : "Win the next draw"}
             color="pink"
           />
         </div>
@@ -751,29 +1033,40 @@ export default function AppPage() {
         {/* Actions */}
         <div className="mt-10 grid gap-6 lg:grid-cols-2">
           {/* Deposit */}
-          <ActionCard title="Deposit" description="Add funds to get lottery tickets">
+          <ActionCard title="Deposit" description={`Add ${selectedToken?.symbol ?? 'tokens'} to get lottery tickets`}>
             <div className="space-y-4">
               <div>
                 <div className="mb-2 flex items-center justify-between text-sm">
                   <span className="text-zinc-500">Amount</span>
                   <span className="text-zinc-600">
-                    Balance: <span className="font-semibold">{formatAmount(balance)}</span>
+                    Balance: <span className="font-semibold">{formatAmount(currentState?.balance ?? 0n, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
                   </span>
                 </div>
                 <Input
                   value={depositAmount}
                   onChange={setDepositAmount}
                   placeholder="0.00"
-                  suffix="USDE"
+                  suffix={selectedToken?.symbol ?? 'TOKEN'}
                 />
               </div>
               <div className="flex gap-3">
                 {needsApproval ? (
                   <Button onClick={approve} disabled={loading || !connected} fullWidth>
-                    {loading ? "Approving..." : "Approve"}
+                    {loading ? "Approving..." : `Approve ${selectedToken?.symbol ?? ''}`}
                   </Button>
                 ) : (
-                  <Button onClick={deposit} disabled={loading || !connected || !depositAmount} fullWidth>
+                  <Button
+                    onClick={deposit}
+                    disabled={
+                      loading ||
+                      !connected ||
+                      !depositAmount ||
+                      depositParsed === null ||
+                      depositParsed === 0n ||
+                      insufficientBalance
+                    }
+                    fullWidth
+                  >
                     {loading ? "Depositing..." : "Deposit"}
                   </Button>
                 )}
@@ -788,17 +1081,28 @@ export default function AppPage() {
                 <div className="mb-2 flex items-center justify-between text-sm">
                   <span className="text-zinc-500">Amount</span>
                   <span className="text-zinc-600">
-                    Deposited: <span className="font-semibold">{formatAmount(deposits)}</span>
+                    Deposited: <span className="font-semibold">{formatAmount(currentState?.deposits ?? 0n, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
                   </span>
                 </div>
                 <Input
                   value={withdrawAmount}
                   onChange={setWithdrawAmount}
                   placeholder="0.00"
-                  suffix="USDE"
+                  suffix={selectedToken?.symbol ?? 'TOKEN'}
                 />
               </div>
-              <Button onClick={withdraw} disabled={loading || !connected || !withdrawAmount} fullWidth>
+              <Button
+                onClick={withdraw}
+                disabled={
+                  loading ||
+                  !connected ||
+                  !withdrawAmount ||
+                  withdrawParsed === null ||
+                  withdrawParsed === 0n ||
+                  insufficientDeposits
+                }
+                fullWidth
+              >
                 {loading ? "Withdrawing..." : "Withdraw"}
               </Button>
             </div>
@@ -806,11 +1110,11 @@ export default function AppPage() {
         </div>
 
         {/* Claim Prize */}
-        {claimable > 0n && (
+        {(currentState?.claimable ?? 0n) > 0n && (
           <div className="mt-6">
-            <ActionCard title="🎉 You won!" description="Claim your prize winnings">
+            <ActionCard title="🎉 You won!" description={`Claim your ${selectedToken?.symbol ?? ''} prize winnings`}>
               <div className="flex items-center justify-between">
-                <div className="text-2xl font-black text-pink-600">${formatAmount(claimable)}</div>
+                <div className="text-2xl font-black text-pink-600">{formatAmount(currentState?.claimable ?? 0n, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</div>
                 <Button onClick={claim} disabled={loading}>
                   {loading ? "Claiming..." : "Claim Prize"}
                 </Button>
@@ -820,15 +1124,18 @@ export default function AppPage() {
         )}
 
         {/* Test Controls (only for localhost) */}
-        {faucetOk && (
+        {mounted && faucetOk && isLocalhost && (
           <div className="mt-10 rounded-3xl border-2 border-black bg-white p-6 shadow-[8px_8px_0_0_#000]">
             <div className="text-sm font-black text-zinc-950">Test Mode (localhost only)</div>
             <div className="mt-2 text-xs font-semibold text-zinc-700">
-              These controls help you test the app locally.
+              These controls help you test the app with test tokens.
             </div>
             <div className="mt-4 flex flex-wrap gap-3">
-              <Button variant="secondary" onClick={mintTestTokens} disabled={loading || !connected}>
-                Mint 1000 Test Tokens
+              <Button variant="secondary" onClick={mintTestTokens} disabled={loading || !connected || !selectedToken}>
+                Claim 1000 {selectedToken?.symbol ?? 'Tokens'}
+              </Button>
+              <Button variant="secondary" onClick={mintAllTestTokens} disabled={loading || !connected}>
+                Claim All Tokens
               </Button>
               <Button variant="secondary" onClick={simulateYield} disabled={loading || !connected}>
                 Simulate Yield (+50)
@@ -847,11 +1154,11 @@ export default function AppPage() {
             <ul className="mt-4 space-y-3 text-sm font-semibold text-zinc-800">
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
-                Each $1 deposited = 1 lottery ticket
+                Each token deposited = 1 lottery ticket
               </li>
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
-                Weekly draws pick winners based on tickets
+                Weekly draws happen every 7 days from deployment
               </li>
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
@@ -864,21 +1171,21 @@ export default function AppPage() {
             </ul>
           </div>
           <div className="we-card rounded-3xl border-2 border-black bg-white p-8 shadow-[6px_6px_0_0_#000]">
-            <h3 className="font-display mag-underline text-3xl text-zinc-950">Pool Stats</h3>
+            <h3 className="font-display mag-underline text-3xl text-zinc-950">Pool Stats ({selectedToken?.symbol ?? 'Token'})</h3>
             <div className="mt-4 space-y-3 text-sm font-semibold">
               <div className="flex items-center justify-between">
                 <span className="text-zinc-800">Total Deposits</span>
-                <span className="font-black text-zinc-950">${formatAmount(totalDeposits)}</span>
+                <span className="font-black text-zinc-950">{formatAmount(totalDeposits, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-zinc-800">Prize Pool</span>
-                <span className="font-black text-zinc-950">${formatAmount(prizePool)}</span>
+                <span className="font-black text-zinc-950">{formatAmount(prizePool, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-zinc-800">Your Share</span>
                 <span className="font-black text-zinc-950">
                   {totalDeposits > 0n
-                    ? `${((Number(deposits) / Number(totalDeposits)) * 100).toFixed(2)}%`
+                    ? `${((Number(currentState?.deposits ?? 0n) / Number(totalDeposits)) * 100).toFixed(2)}%`
                     : "0%"}
                 </span>
               </div>

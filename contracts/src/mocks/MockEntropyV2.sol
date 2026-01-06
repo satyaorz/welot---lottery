@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.19;
 
-import {IEntropyV2} from "../interfaces/IEntropyV2.sol";
+import {IEntropyV2, IEntropyConsumer} from "../interfaces/IEntropyV2.sol";
 
-/// @notice Minimal mock of Pyth Entropy V2 request flow for localhost.
+/// @notice Minimal mock of Pyth Entropy V2 request flow.
 contract MockEntropyV2 is IEntropyV2 {
     uint256 public fee;
     uint64 public nextSeq;
 
     mapping(uint64 => address) public requester;
 
-    constructor(uint256 fee_) {
-        fee = fee_;
+    constructor() {
+        fee = 0; // Free for local testing
         nextSeq = 1;
     }
 
@@ -19,27 +19,28 @@ contract MockEntropyV2 is IEntropyV2 {
         fee = fee_;
     }
 
-    function getFeeV2() external view returns (uint256) {
+    function getFee(address) external view override returns (uint256) {
         return fee;
     }
 
-    function requestV2() external payable returns (uint64 sequenceNumber) {
-        require(msg.value == fee, "FEE");
+    function getFeeV2() external view override returns (uint256) {
+        return fee;
+    }
+
+    function requestV2() external payable override returns (uint64 sequenceNumber) {
         sequenceNumber = nextSeq++;
         requester[sequenceNumber] = msg.sender;
     }
 
+    /// @notice Simulate fulfillment (call this from tests)
     function fulfill(uint64 sequenceNumber, bytes32 random) external {
         address target = requester[sequenceNumber];
         require(target != address(0), "NO_REQ");
-        (bool ok,) = target.call(
-            abi.encodeWithSignature(
-                "entropyCallback(uint64,address,bytes32)",
-                sequenceNumber,
-                address(this),
-                random
-            )
-        );
-        require(ok, "CALLBACK_FAIL");
+        IEntropyConsumer(target).entropyCallback(sequenceNumber, address(this), random);
+    }
+
+    /// @notice Direct fulfillment with target address
+    function fulfillRandomness(address target, uint256 sequenceNumber, bytes32 random) external {
+        IEntropyConsumer(target).entropyCallback(uint64(sequenceNumber), address(this), random);
     }
 }

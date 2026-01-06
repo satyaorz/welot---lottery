@@ -158,7 +158,7 @@ export default function Home() {
                 className="h-40 w-full object-cover"
               />
             </div>
-            <p className="mt-3 text-xs font-semibold text-zinc-300">Brand is local: logo in /public.</p>
+            <p className="mt-3 text-xs font-semibold text-zinc-300">Coming soon on mainnet.</p>
           </div>
         </section>
 
