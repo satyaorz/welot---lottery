@@ -61,31 +61,17 @@ export PRIVATE_KEY=0xyour_keeper_private_key
 npm run keeper
 ```
 
-The contract aligns 2-hour epochs to UTC even-hour boundaries (00:00, 02:00, 04:00, ...). The keeper can poll frequently (e.g. every 30s) and will only send a tx when `upkeepNeeded=true`.
-- **Pyth Entropy**: Verifiable on-chain randomness for fair winner selection
-- **Real-time stats**: See pool totals, your tickets, and claimable prizes
+The keeper simply follows the contract’s `checkUpkeep` → `performUpkeep` flow. You can poll frequently (e.g. every 30s); it will only send a tx when `upkeepNeeded=true`.
 
-## Mantle Sepolia (5003) Deployment
+Notes:
+- If the owner sets `automationForwarder` on the vault, the keeper must run from that same address.
+- Draw execution is multi-step: close epoch → request randomness → finalize once the Entropy callback arrives.
 
-Deployed on Mantle Sepolia testnet (chainId `5003`). For local dev or hosting (e.g. Vercel), set:
+## Mantle Sepolia (5003) deployment
 
-```env
-NEXT_PUBLIC_RPC_URL=https://rpc.sepolia.mantle.xyz
-NEXT_PUBLIC_CHAIN_ID=5003
+Deploy using `contracts/script/DeployMantle.s.sol` and copy the printed `NEXT_PUBLIC_*` values into `frontend/.env.local`.
 
-# Core
-NEXT_PUBLIC_WELOT_VAULT=0x8601C4932173571ee941fa0a26dE2379E351b164
-NEXT_PUBLIC_ENTROPY=0x98046Bd286715D3B0BC227Dd7a956b83D8978603
-NEXT_PUBLIC_FAUCET=0x8b4AFcf270A4727F377eCf8a167073B87ECa7658
-
-# Tokens
-NEXT_PUBLIC_USDE=0x271b8d3cdc2F5aD3Cc569ECe3cFDEA79EDC806E5
-NEXT_PUBLIC_SUSDE=0x3F95B8124E51380Fbabc57ad3FbF32FD6669cDA8
-NEXT_PUBLIC_USDC=0xc3f30eA136ac7f398Cdc1fc3877DAfcF9E5B517C
-NEXT_PUBLIC_SUSDC=0xA35b6412E7e216e3EA032bb9e543bEFa5cD19152
-NEXT_PUBLIC_METH=0x4Cf52d4cfb118F04e2A76808422b2573Cf3051Cc
-NEXT_PUBLIC_SMETH=0x2b13239c4683d22F127ba7Af5B06Cb41d84f67Ad
-```
+Addresses can change between redeploys; the deploy script output is the source of truth.
 
 ## Environment Variables
 
@@ -143,7 +129,7 @@ frontend/
 
 ## Technologies
 
-- **Next.js 15** - React framework
+- **Next.js 16** - React framework
 - **Tailwind CSS** - Styling
 - **Viem** - Ethereum interactions
 - **TypeScript** - Type safety
@@ -154,4 +140,4 @@ Icons from [Twemoji](https://twemoji.twitter.com/) (CC-BY 4.0), stored locally i
 
 ## License
 
-MIT
+UNLICENSED (hackathon/demo)

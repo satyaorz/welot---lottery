@@ -21,7 +21,7 @@ Deployed via `contracts/script/DeployMantle.s.sol` (chainId `5003`). For testnet
 - `MockFaucet`
   - Lets wallets mint test tokens once per token (cooldown=0, but still “one-time claim per token” logic)
 
-The deploy script prints `NEXT_PUBLIC_*` values which were copied into `frontend/.env.local` for the UI.
+The deploy script prints `NEXT_PUBLIC_*` values which can be copied into `frontend/.env.local` for the UI.
 
 ## Frontend configuration
 
@@ -50,7 +50,7 @@ After changing `frontend/.env.local`, restart the dev server so Next inlines the
 3. `entropyCallback(...)`
    - Called by entropy provider to deliver randomness
 4. `finalizeDraw()`
-   - Picks a winning pool and distributes rewards via `rewardIndex`
+  - Picks a winning pool (time-weighted by pool deposits) and distributes rewards via per-token reward indices
 
 ### Testnet randomness options
 
@@ -58,8 +58,8 @@ After changing `frontend/.env.local`, restart the dev server so Next inlines the
   - Call `requestRandomness()` and wait for the provider callback (`entropyCallback`).
   - Once randomness is ready, call `finalizeDraw()`.
 - **Mock entropy (opt-in)**
-  - Deploy with `DEPLOY_MOCK_ENTROPY=true`.
-  - Then you can deterministically fulfill locally by calling `MockEntropyV2.fulfill(...)`.
+  - Deploy with `DEPLOY_MOCK_ENTROPY=true` (and do not override `ENTROPY_ADDRESS`).
+  - Then you can deterministically fulfill by calling `MockEntropyV2.fulfill(sequence, randomness)`.
 
 ## Automation (production-grade on Mantle)
 
@@ -162,6 +162,22 @@ forge script script/DeployMantle.s.sol:DeployMantleScript --rpc-url "$MANTLE_SEP
 
 # Optional: override entropy address (if Pyth address changes)
 # ENTROPY_ADDRESS=0x... forge script ...
+```
+
+Run a draw end-to-end using the helper script (only works with on-chain `MockEntropyV2`):
+
+```bash
+cd contracts
+set -a
+source .env
+set +a
+
+# Set these from your deploy output
+export WELOT_VAULT=0x...
+export ENTROPY=0x...
+
+# Defaults: MOCK_ENTROPY=true and RANDOM_WORD=1
+forge script script/RunDraw.s.sol:RunDrawScript --rpc-url "$MANTLE_SEPOLIA_RPC_URL" --private-key "$PRIVATE_KEY" --broadcast
 ```
 
 Run the frontend:

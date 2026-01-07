@@ -5,8 +5,8 @@ No-loss savings lottery on Mantle Network.
 ## How It Works
 
 1. **Deposit** any supported stablecoin (USDe, USDC, mETH, etc.)
-2. **Earn tickets** proportional to deposit value
-3. **Weekly draws** award accumulated yield to random winners
+2. **Earn chances** over time based on your deposited balance
+3. **Weekly draws** award accumulated yield to a random winning pool
 4. **Withdraw** your deposits anytime — principal is never at risk
 
 Your deposit is never touched — only the yield generated goes into the prize pool.
@@ -16,11 +16,12 @@ Your deposit is never touched — only the yield generated goes into the prize p
 ### Core Contract: `WelotVault`
 
 - **Multi-token support**: Each supported token has its own ERC-4626 yield vault
-- **Ticket system**: 1 ticket per token unit deposited (adjusted for decimals)
-- **Weekly epochs**: Automated draws every Friday at noon UTC
-- **Chainlink Automation**: `checkUpkeep()` / `performUpkeep()` for decentralized execution
-- **Pyth Entropy**: Verifiable randomness for provably fair winner selection
-- **Prize claiming**: Winners claim accumulated yield prizes
+- **Pools**: Users deposit into pools; pool `1` is created by default
+- **Winner weighting**: Pool selection is time-weighted by deposited balances (normalized to 18 decimals)
+- **Weekly epochs**: With `drawInterval = 7 days`, draws align to Friday 12:00 UTC
+- **Automation**: `checkUpkeep()` / `performUpkeep()` support off-chain keepers
+- **Pyth Entropy**: Verifiable randomness (async callback)
+- **Prize claiming**: Winners claim yield prizes allocated via per-token reward indices
 
 ### Token Configuration
 
@@ -28,18 +29,24 @@ Each supported token requires:
 - `token`: ERC-20 token address
 - `vault`: ERC-4626 yield vault whose `asset()` matches the token
 - `enabled`: Whether deposits are currently accepted
-- `ticketRatio`: Tickets per token unit (for decimal normalization)
+- `decimals`: Token decimals (read automatically in `addSupportedToken`)
 
 ### Key Functions
 
 | Function | Description |
 |----------|-------------|
-| `deposit(token, amount)` | Deposit tokens to enter the lottery |
-| `withdraw(token, amount)` | Withdraw deposited tokens |
-| `claimPrize(token)` | Claim accumulated prize winnings |
-| `closeEpoch()` | End current epoch, request random number |
-| `checkUpkeep()` | Chainlink Automation check |
-| `performUpkeep()` | Chainlink Automation execution |
+| `createPool()` | Create a new pool |
+| `deposit(token, amount)` | Deposit tokens into pool `1` |
+| `depositTo(token, amount, poolId, recipient)` | Deposit into a specific pool |
+| `withdraw(token, amount)` | Withdraw from pool `1` |
+| `withdrawFrom(token, amount, poolId)` | Withdraw from a specific pool |
+| `claimPrize(token)` | Claim prize from pool `1` |
+| `claimPrizeFrom(token, poolId)` | Claim prize from a specific pool |
+| `closeEpoch()` | End current epoch (once end time is reached) |
+| `requestRandomness()` | Request Entropy randomness (pays fee) |
+| `finalizeDraw()` | Select winning pool, allocate prizes |
+| `checkUpkeep()` | Automation check (returns `performData`) |
+| `performUpkeep(performData)` | Automation step executor |
 
 ## Development
 
@@ -83,11 +90,14 @@ forge script script/DeployLocal.s.sol:DeployLocalScript \
 ### Local Deployment Output
 
 The deploy script outputs all necessary environment variables:
-- `NEXT_PUBLIC_VAULT` - WelotVault contract address
-- `NEXT_PUBLIC_USDE` / `NEXT_PUBLIC_USDC` / `NEXT_PUBLIC_METH` - Token addresses
-- `NEXT_PUBLIC_USDE_VAULT` / etc. - Yield vault addresses
-- `NEXT_PUBLIC_FAUCET` - Multi-token faucet for testing
-- `NEXT_PUBLIC_ENTROPY` - Mock entropy provider
+- `NEXT_PUBLIC_RPC_URL` / `NEXT_PUBLIC_CHAIN_ID`
+- `NEXT_PUBLIC_WELOT_VAULT` - WelotVault contract address
+- `NEXT_PUBLIC_ENTROPY` - Entropy provider address
+- `NEXT_PUBLIC_FAUCET` - Multi-token faucet for demos
+- Token + yield vault addresses:
+  - `NEXT_PUBLIC_USDE`, `NEXT_PUBLIC_SUSDE`
+  - `NEXT_PUBLIC_USDC`, `NEXT_PUBLIC_SUSDC`
+  - `NEXT_PUBLIC_METH`, `NEXT_PUBLIC_SMETH`
 
 ## Contract Files
 
@@ -104,7 +114,6 @@ src/
 ## Dependencies
 
 - [OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts) - ReentrancyGuard, Pausable, Ownable
-- [Chainlink Brownie Contracts](https://github.com/smartcontractkit/chainlink-brownie-contracts) - Automation interfaces
 - [Forge Std](https://github.com/foundry-rs/forge-std) - Testing utilities
 
 ## Security Considerations
@@ -112,10 +121,10 @@ src/
 - **Principal protection**: Deposits tracked as liabilities, never used for prizes
 - **Yield-only prizes**: Only vault yield surplus goes to prize pool
 - **Reentrancy protection**: OpenZeppelin ReentrancyGuard on all state-changing functions
-- **Bounded gas**: Pool set limited to MAX_POOL_KEYS (100) to prevent gas exhaustion
+- **Bounded gas**: Draw iterates over pools and supported tokens; deployments set a `maxPools` cap (64 in scripts)
 - **Emergency pause**: Owner can pause all deposits/withdrawals
 - **Verified randomness**: Pyth Entropy provides on-chain verifiable randomness
 
 ## License
 
-MIT
+UNLICENSED (hackathon/demo)

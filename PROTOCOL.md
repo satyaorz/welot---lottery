@@ -2,253 +2,144 @@
 
 ## Overview
 
-WeLot is a **no-loss savings lottery** built on Mantle Network. Users deposit supported tokens, which are automatically routed to yield-generating vaults. The yield is pooled together and distributed to random winners in weekly draws — while deposits remain fully withdrawable at any time.
-
-## Core Concept: No-Loss Lottery
-
-Traditional lotteries require you to pay for tickets that have no value if you lose. WeLot inverts this:
-
-1. **Deposit** → Your tokens go into an ERC-4626 yield vault
-2. **Earn tickets** → Receive tickets proportional to your deposit
-3. **Win yield** → Weekly draws distribute accumulated yield to winners
-4. **Withdraw anytime** → Your principal is always yours to withdraw
-
-**You can only win; you cannot lose your deposit.**
+WeLot is a no-loss savings lottery on Mantle. Users deposit supported ERC-20 tokens into the protocol, which routes them into per-token ERC-4626 yield sources. The yield surplus (assets above liabilities) becomes the prize pool.
 
-## Protocol Architecture
+Draws run on a cadence (weekly in this repo). A draw selects a winning **pool**, then distributes each token’s prize to depositors of that token **inside the winning pool**, pro-rata.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        WelotVault                           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-│  │   Token A   │  │   Token B   │  │   Token C   │         │
-│  │   (USDe)    │  │   (USDC)    │  │   (mETH)    │         │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘         │
-│         │                │                │                 │
-│         ▼                ▼                ▼                 │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
-│  │ Yield Vault │  │ Yield Vault │  │ Yield Vault │         │
-│  │  (ERC4626)  │  │  (ERC4626)  │  │  (ERC4626)  │         │
-│  └─────────────┘  └─────────────┘  └─────────────┘         │
-│                                                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │                   Epoch Manager                       │  │
-│  │  • Weekly epochs (Friday noon UTC)                   │  │
-│  │  • Keeper-based automation integration               │  │
-│  │  • Pyth Entropy randomness                          │  │
-│  └──────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
+## On-chain components
 
-## Token Support
+### `WelotVault` (core)
 
-WeLot supports multiple tokens simultaneously. Each token operates in its own pool:
+`WelotVault` manages:
 
-| Token | Description | Yield Source |
-|-------|-------------|--------------|
-| USDe  | Ethena USD  | sUSDe vault  |
-| USDC  | USD Coin    | Aave/Compound |
-| mETH  | Mantle ETH  | Staking yield |
+- Supported deposit tokens (`addSupportedToken(token, yieldVault)`)
+- User deposits per token, per pool
+- Epoch state machine and draw scheduling
+- Randomness via Pyth Entropy (async callback)
+- Prize accounting via per-token “reward indices”
 
-### Adding New Tokens
-
-Tokens are added via `addSupportedToken(address token, address vault, uint256 ticketRatio)`:
-- `token`: The ERC-20 token address
-- `vault`: An ERC-4626 vault that accepts this token
-- `ticketRatio`: Tickets per token unit (for decimal normalization)
+### Yield sources
 
-## Weekly Draw Flow
+Each supported token is configured with an ERC-4626 vault whose `asset()` must equal the token. `WelotVault` deposits assets into these vaults and later withdraws assets to satisfy withdrawals/prize claims.
 
-### 1. Epoch Management
-
-Epochs run weekly, closing every Friday at noon UTC:
+### Randomness (Pyth Entropy)
 
-```
-Week 1                    Week 2
-├────────────────────────┼────────────────────────┤
-│   Deposits accumulate  │   Deposits accumulate  │
-│   Yield generates      │   Yield generates      │
-└────────┬───────────────┴───────────┬────────────┘
-         │                           │
-    closeEpoch()                closeEpoch()
-         │                           │
-         ▼                           ▼
-    Random request              Random request
-         │                           │
-         ▼                           ▼
-    Winner selected             Winner selected
-```
+`WelotVault` uses Entropy V2:
 
-### 2. Automation / Keepers
+- `requestRandomness()` pays `entropy.getFeeV2()` and calls `entropy.requestV2()`
+- Entropy later calls back `entropyCallback(sequenceNumber, provider, randomNumber)`
+- The callback must not revert; the contract ignores invalid callbacks and only accepts messages from the configured entropy address
 
-The contract implements a `checkUpkeep`/`performUpkeep` flow compatible with Chainlink-style automation, but on Mantle you may need to run a keeper off-chain (cron + relayer, Gelato, Defender, etc.).
+## Pools (the “lottery tickets”)
 
-```solidity
-function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory) {
-    upkeepNeeded = block.timestamp >= currentEpochEnd;
-}
+Users deposit into **pools**. Pool `1` is created in the constructor as the default.
 
-function performUpkeep(bytes calldata) external {
-    closeEpoch();
-}
-```
+- Create a new pool: `createPool()`
+- Deposit into pool 1: `deposit(token, amount)`
+- Deposit into a specific pool: `depositTo(token, amount, poolId, recipient)`
 
-Run a keeper that periodically calls `checkUpkeep` and submits `performUpkeep(performData)` when `upkeepNeeded` is true.
+### Winner weighting: time-weighted deposits
 
-### 3. Pyth Entropy Randomness
+Winner selection is pool-based and **time-weighted**.
 
-Winner selection uses Pyth Entropy for verifiable on-chain randomness:
+Each pool maintains a cumulative weight that approximates:
 
-1. `closeEpoch()` calls `entropy.requestWithCallback()`
-2. Pyth generates random number off-chain
-3. `entropyCallback()` receives the random number
-4. Winner is selected: `winner = depositors[random % totalTickets]`
+$$\text{poolWeight} = \int \text{poolBalanceNormalized}(t)\,dt$$
 
-## Prize Distribution
+Where `poolBalanceNormalized` is the pool’s total deposits across all supported tokens, normalized to 18 decimals.
 
-### How Prizes Are Calculated
+At draw time, `finalizeDraw()` selects a pool with probability proportional to this cumulative weight.
 
-```
-Prize Pool = Vault Assets - Total Deposits (Liabilities)
-```
+## Epochs and draw lifecycle
 
-Only the **yield surplus** becomes prizes. User deposits are tracked as liabilities and never distributed.
+### Scheduling
 
-### Winner Selection
+This repo’s deploy scripts set `drawInterval = 7 days`. When `drawInterval == 7 days`, end times are aligned to **Friday 12:00 UTC**.
 
-For each token pool:
-1. Calculate total tickets from all depositors
-2. Generate random number in range `[0, totalTickets)`
-3. Walk through depositors until cumulative tickets exceed random number
-4. That depositor wins the entire prize pool for that token
+If `drawInterval` is something else (for local demos), end times are interval-aligned boundaries.
 
-### Claiming Prizes
+### State machine
 
-Winners can claim at any time:
-```solidity
-claimPrize(address token)
-```
+An epoch progresses through:
 
-Prize amounts persist across epochs until claimed.
+1. **Open** — accepts deposits/withdrawals
+2. **Closed** — epoch ended; deposits are still allowed by the contract, but the draw lifecycle starts here
+3. **RandomnessRequested** — waiting for Entropy callback
+4. **RandomnessReady** — random number received; ready to finalize
 
-## User Actions
+The intended operational flow is:
 
-### Deposit
+1. `closeEpoch()` once `block.timestamp >= epoch.end`
+2. `requestRandomness()` (requires enough ETH/MNT in the vault to pay `entropy.getFeeV2()`)
+3. Wait for `entropyCallback(...)`
+4. `finalizeDraw()` to pick a winning pool and distribute prizes
 
-```solidity
-deposit(address token, uint256 amount)
-```
-- Requires prior approval
-- Tokens routed to yield vault
-- Tickets credited immediately
-- Counts toward current epoch
+## Prize pools and accounting
 
-### Withdraw
+### Liabilities vs assets
 
-```solidity
-withdraw(address token, uint256 amount)
-```
-- Instantly withdrawable
-- Tickets deducted
-- Shares redeemed from vault
-- Can withdraw partial or full amount
+For each token, the protocol tracks:
 
-### Claim Prize
+- `totalDeposits` — user principal (liability)
+- `totalUnclaimedPrizes` — prizes allocated to winners but not yet claimed (liability)
 
-```solidity
-claimPrize(address token)
-```
-- Claims accumulated winnings
-- Transfers yield from vault
-- Resets claimable balance to zero
+The current prize pool for a token is:
 
-## Security Model
+$$\text{prizePool(token)} = \max(\text{totalAssets(token)} - (\text{totalDeposits(token)} + \text{totalUnclaimedPrizes(token)}), 0)$$
 
-### Principal Protection
+### Distribution model
 
-User deposits are tracked separately from vault shares:
-```solidity
-mapping(bytes32 => uint256) public deposits;      // User liabilities
-mapping(address => uint256) public totalDeposited; // Per-token liabilities
-```
+When a winning pool is selected, `finalizeDraw()` loops over supported tokens and, for each token:
 
-The vault may have more assets than liabilities (from yield). This surplus is the prize pool.
+- Computes `prize = currentPrizePool(token)`
+- If the winning pool has any deposits of that token, it updates:
+  - `poolTokenRewardIndex[token][winningPoolId] += (prize * 1e18) / winnerTokenDeposits`
+  - `totalUnclaimedPrizes += prize`
 
-### Reentrancy Protection
+This means:
 
-All state-changing functions use `nonReentrant` modifier:
-- `deposit()`
-- `withdraw()`
-- `claimPrize()`
-- `closeEpoch()`
+- Prizes are claimable per token and per pool.
+- If the winning pool has **zero** deposits of a token, that token’s prize pool is not allocated in that draw (it remains as surplus for future draws).
 
-### Bounded Iterations
+### Claiming
 
-Pool sets are bounded to `MAX_POOL_KEYS = 100` to prevent gas exhaustion during winner selection.
+Users claim via:
 
-### Emergency Controls
+- `claimPrize(token)` (default pool 1)
+- `claimPrizeFrom(token, poolId)` (specific pool)
 
-Owner can pause/unpause:
-```solidity
-pause()   // Blocks deposits and withdrawals
-unpause() // Resumes normal operation
-```
+Claims withdraw assets from the token’s yield vault.
 
-## Integration Guide
+## Automation / keepers
 
-### Frontend Integration
+`WelotVault` exposes Chainlink-style automation endpoints:
 
-1. **Load supported tokens**:
-```typescript
-const tokens = await contract.read.getSupportedTokens()
-```
+- `checkUpkeep(bytes)` returns `(upkeepNeeded, performData)`
+- `performUpkeep(bytes performData)` executes one step based on `performData`
 
-2. **Get user state**:
-```typescript
-const deposits = await contract.read.deposits([poolKey])
-const claimable = await contract.read.claimable([poolKey])
-```
+The contract uses `performData` to encode an action:
 
-3. **Deposit**:
-```typescript
-await token.write.approve([vaultAddress, amount])
-await vault.write.deposit([tokenAddress, amount])
-```
+- `1` = close epoch
+- `2` = request randomness
+- `3` = finalize draw
 
-4. **Withdraw**:
-```typescript
-await vault.write.withdraw([tokenAddress, amount])
-```
+Optionally, the owner can set an `automationForwarder` via `setAutomationForwarder(address)`. If set, only that address may call `performUpkeep`.
 
-### Automation Setup
+## Key read methods (for UIs)
 
-1. Deploy WelotVault
-2. Configure your keeper
-3. Fund the Automation subscription
-4. Contract auto-executes weekly draws
+- `getSupportedTokens()`
+- `getUserPosition(token, poolId, user)` → `(deposited, claimable)`
+- `currentPrizePool(token)`
+- `getTimeUntilDraw()`
+- `epochStatus()` / `getCurrentEpoch()` / `getEpoch(epochId)`
+- `getPastWinners(limit)`
 
-## Deployed Addresses
+## Risks / notes
 
-### Mantle Mainnet
-*Coming soon*
-
-### Mantle Testnet
-*Coming soon*
-
-### Local Development
-Run `forge script script/DeployLocal.s.sol` — addresses printed to console.
-
-## Risks & Considerations
-
-### Yield Risk
-If the underlying vault generates negative yield (e.g., from slashing), the prize pool could be zero.
-
-### Smart Contract Risk
-As with any DeFi protocol, there's risk of bugs. The code uses audited OpenZeppelin contracts where possible.
-
-### Randomness Trust
-Pyth Entropy provides verifiable randomness, but users must trust the Pyth network's integrity.
+- Yield source risk: ERC-4626 vaults can lose money; prize pools can be $0.
+- Randomness is async: draws are not a single transaction; you need automation/off-chain ops.
+- This is hackathon/demo code; treat it accordingly.
 
 ## License
 
-MIT
+UNLICENSED (repo code). Dependencies are under their own licenses.
