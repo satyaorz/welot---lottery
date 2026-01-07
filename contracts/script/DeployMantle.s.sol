@@ -46,9 +46,18 @@ contract DeployMantleScript is Script {
     // MANTLE SEPOLIA TESTNET ADDRESSES
     // ═══════════════════════════════════════════════════════════════════
     
-    // NOTE: For Mantle Sepolia testing we deploy a local MockEntropyV2 on-chain so
-    // the full flow works without relying on external providers.
+    // Pyth Entropy V2 on Mantle Sepolia.
+    // NOTE: Verify/override with ENTROPY_ADDRESS env if this changes.
     address constant PYTH_ENTROPY_TESTNET = 0x98046Bd286715D3B0BC227Dd7a956b83D8978603;
+
+    // Deployed on testnet (stored as state vars to avoid stack-too-deep in `run()`)
+    MockERC20 public usde;
+    MockERC4626 public susde;
+    MockERC20 public usdc;
+    MockERC4626 public susdc;
+    MockERC20 public meth;
+    MockERC4626 public smeth;
+    MockFaucet public faucet;
 
 
 
@@ -67,16 +76,12 @@ contract DeployMantleScript is Script {
             entropyAddr = entropyOverride;
         }
 
-        // For testnet, deploy mocks so the app is fully testable.
-        MockERC20 usde;
-        MockERC4626 susde;
-        MockERC20 usdc;
-        MockERC4626 susdc;
-        MockERC20 meth;
-        MockERC4626 smeth;
-        MockFaucet faucet;
+        // Mantle Sepolia: default to REAL Pyth Entropy.
+        // For local/dev flows, you can opt into an on-chain mock with:
+        //   DEPLOY_MOCK_ENTROPY=true
+        bool deployMockEntropy = vm.envOr("DEPLOY_MOCK_ENTROPY", false);
 
-        if (isTestnet && entropyOverride == address(0)) {
+        if (isTestnet) {
             // Mock tokens + yield vaults
             usde = new MockERC20("USDe", "USDe", 18);
             susde = new MockERC4626(usde, "Staked USDe", "sUSDe", 18);
@@ -93,9 +98,11 @@ contract DeployMantleScript is Script {
             susdc.setYieldRatePerSecond(166666);
             smeth.setYieldRatePerSecond(166666666666666666);
 
-            // Mock entropy (free)
-            MockEntropyV2 mockEntropy = new MockEntropyV2();
-            entropyAddr = address(mockEntropy);
+            if (deployMockEntropy && entropyOverride == address(0)) {
+                // Mock entropy (free)
+                MockEntropyV2 mockEntropy = new MockEntropyV2();
+                entropyAddr = address(mockEntropy);
+            }
 
 
             // Faucet (0 cooldown = one-time claim per token)

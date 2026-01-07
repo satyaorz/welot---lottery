@@ -27,6 +27,8 @@ contract WelotVaultTest is Test {
         // Deploy mock tokens
         usde = new MockERC20("USDe", "USDe", 18);
         susde = new MockERC4626(usde, "sUSDe", "sUSDe", 18);
+        // Unit tests expect prize growth only when explicitly donated.
+        susde.setYieldRatePerSecond(0);
 
         // Deploy mock entropy
         entropy = new MockEntropyV2();
@@ -210,7 +212,8 @@ contract WelotVaultTest is Test {
 
         // 6. Mock fulfills randomness
         bytes32 randomNumber = keccak256(abi.encodePacked("test_random"));
-        entropy.fulfillRandomness(address(vault), vault.currentEpoch(), randomNumber);
+        (,,, uint64 seq,,,) = vault.epochs(vault.currentEpoch());
+        entropy.fulfill(seq, randomNumber);
         assertEq(uint8(vault.epochStatus()), 3); // RandomnessReady
 
         // 7. Finalize draw
@@ -255,7 +258,8 @@ contract WelotVaultTest is Test {
         vault.requestRandomness{value: 0}();
         
         bytes32 randomNumber = keccak256(abi.encodePacked("alice_wins"));
-        entropy.fulfillRandomness(address(vault), vault.currentEpoch(), randomNumber);
+        (,,, uint64 seq,,,) = vault.epochs(vault.currentEpoch());
+        entropy.fulfill(seq, randomNumber);
         
         vault.finalizeDraw();
 

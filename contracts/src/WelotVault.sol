@@ -43,6 +43,11 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     struct Pool {
         bool exists;
         address creator;
+        // NOTE: `totalDeposits` and `rewardIndex` are not used for prize accounting.
+        // Prize accounting is token-specific and tracked via `poolTokenDeposits` and
+        // `poolTokenRewardIndex`.
+        // `totalDeposits` is repurposed as the pool's *normalized* balance (18 decimals)
+        // for winner-weighting via time-weighted deposits.
         uint256 totalDeposits;
         uint256 rewardIndex;
         uint256 cumulative;
@@ -62,6 +67,14 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         uint8 decimals;
         uint256 totalDeposits;
         uint256 totalUnclaimedPrizes;
+    }
+
+    struct PastWinner {
+        uint256 epochId;
+        uint64 timestamp;
+        uint256 winningPoolId;
+        address poolCreator;
+        uint256 totalPrizeNormalized; // 18 decimals
     }
 
     // ══════════════════════════════════════════════════════════════════════════════
@@ -93,12 +106,26 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     
     // Position: token => poolId => user => position
     mapping(address => mapping(uint256 => mapping(address => UserPosition))) public positions;
+
+    // Token-aware pool accounting
+    // token => poolId => total deposits (token decimals)
+    mapping(address => mapping(uint256 => uint256)) public poolTokenDeposits;
+    // token => poolId => reward index (1e18)
+    mapping(address => mapping(uint256 => uint256)) public poolTokenRewardIndex;
     
     // Entropy request tracking
     mapping(uint64 => uint256) public entropyRequestToEpoch;
 
     // Optional keeper forwarder (if set, only this address can call performUpkeep)
     address public automationForwarder;
+
+    // Past winners (ring buffer)
+    uint256 public constant PAST_WINNERS_MAX = 52;
+    uint256 public pastWinnersCount;
+    mapping(uint256 => PastWinner) public pastWinners;
+
+    // Epoch prize breakdown per token (token decimals)
+    mapping(uint256 => mapping(address => uint256)) public epochTokenPrize;
 
     // ══════════════════════════════════════════════════════════════════════════════
     // EVENTS
@@ -113,6 +140,8 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     event RandomnessRequested(uint256 indexed epochId, uint64 sequenceNumber);
     event RandomnessReceived(uint256 indexed epochId, bytes32 randomness);
     event WinnerSelected(uint256 indexed epochId, uint256 indexed winningPoolId, uint256 prize);
+    event PastWinnerRecorded(uint256 indexed epochId, uint256 indexed winningPoolId, address indexed poolCreator, uint256 totalPrizeNormalized);
+    event TokenPrizeRecorded(uint256 indexed epochId, address indexed token, uint256 prize);
     event PrizeClaimed(address indexed user, address indexed token, uint256 indexed poolId, uint256 amount);
     event AutomationForwarderSet(address indexed forwarder);
 
@@ -354,10 +383,24 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     function _pendingPrize(address token, uint256 poolId, address user) internal view returns (uint256) {
         UserPosition storage pos = positions[token][poolId][user];
-        Pool storage pool = pools[poolId];
-        if (!pool.exists) return 0;
-        uint256 deltaIndex = pool.rewardIndex - pos.rewardIndexPaid;
+        if (!pools[poolId].exists) return 0;
+        uint256 currentIndex = poolTokenRewardIndex[token][poolId];
+        uint256 deltaIndex = currentIndex - pos.rewardIndexPaid;
         return pos.pendingPrize + (pos.deposits * deltaIndex) / 1e18;
+    }
+
+    function _to18(uint256 amount, uint8 decimals) internal pure returns (uint256) {
+        if (decimals == 18) return amount;
+        if (decimals < 18) return amount * (10 ** (18 - decimals));
+        return amount / (10 ** (decimals - 18));
+    }
+
+    function _poolBalanceNormalized(uint256 poolId) internal view returns (uint256 total) {
+        for (uint256 i = 0; i < supportedTokens.length; i++) {
+            address token = supportedTokens[i];
+            TokenConfig storage config = tokenConfigs[token];
+            total += _to18(poolTokenDeposits[token][poolId], config.decimals);
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════════
@@ -395,6 +438,24 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     /// @notice Get list of all supported tokens
     function getSupportedTokens() external view returns (address[] memory) {
         return supportedTokens;
+    }
+
+    /// @notice Return up to `limit` most recent past winners (newest first).
+    /// @dev Uses a ring buffer of size `PAST_WINNERS_MAX`.
+    function getPastWinners(uint256 limit) external view returns (PastWinner[] memory) {
+        uint256 count = pastWinnersCount;
+        if (count == 0 || limit == 0) return new PastWinner[](0);
+
+        uint256 available = count < PAST_WINNERS_MAX ? count : PAST_WINNERS_MAX;
+        if (limit > available) limit = available;
+
+        PastWinner[] memory out = new PastWinner[](limit);
+        for (uint256 i = 0; i < limit; i++) {
+            uint256 globalIdx = count - 1 - i;
+            uint256 ringIdx = globalIdx % PAST_WINNERS_MAX;
+            out[i] = pastWinners[ringIdx];
+        }
+        return out;
     }
 
     /// @notice Configure a token (add or update)
@@ -468,10 +529,12 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         pos.deposits += amount;
 
         Pool storage pool = pools[poolId];
-        pool.totalDeposits += amount;
+        poolTokenDeposits[token][poolId] += amount;
         config.totalDeposits += amount;
 
-        _updatePoolBalance(poolId, pool.totalDeposits);
+        uint256 newBalanceNormalized = _poolBalanceNormalized(poolId);
+        pool.totalDeposits = newBalanceNormalized;
+        _updatePoolBalance(poolId, newBalanceNormalized);
 
         emit Deposited(recipient, token, poolId, amount);
     }
@@ -497,10 +560,12 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         pos.deposits -= amount;
 
         Pool storage pool = pools[poolId];
-        pool.totalDeposits -= amount;
+        poolTokenDeposits[token][poolId] -= amount;
         config.totalDeposits -= amount;
 
-        _updatePoolBalance(poolId, pool.totalDeposits);
+        uint256 newBalanceNormalized = _poolBalanceNormalized(poolId);
+        pool.totalDeposits = newBalanceNormalized;
+        _updatePoolBalance(poolId, newBalanceNormalized);
 
         config.yieldVault.withdraw(amount, msg.sender, address(this));
 
@@ -646,11 +711,13 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
             
             uint256 prize = currentPrizePool(token);
             if (prize > 0 && winningPoolId != 0) {
-                Pool storage pool = pools[winningPoolId];
-                if (pool.totalDeposits > 0) {
-                    pool.rewardIndex += (prize * 1e18) / pool.totalDeposits;
+                uint256 winnerTokenDeposits = poolTokenDeposits[token][winningPoolId];
+                if (winnerTokenDeposits > 0) {
+                    poolTokenRewardIndex[token][winningPoolId] += (prize * 1e18) / winnerTokenDeposits;
                     config.totalUnclaimedPrizes += prize;
-                    totalPrize += prize * (10 ** (18 - config.decimals));
+                    epochTokenPrize[currentEpochId][token] = prize;
+                    emit TokenPrizeRecorded(currentEpochId, token, prize);
+                    totalPrize += _to18(prize, config.decimals);
                 }
             }
         }
@@ -659,6 +726,21 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         e.winningPoolId = winningPoolId;
 
         emit WinnerSelected(currentEpochId, winningPoolId, totalPrize);
+
+        // Record into ring buffer history for frontend
+        if (winningPoolId != 0) {
+            uint256 idx = pastWinnersCount % PAST_WINNERS_MAX;
+            PastWinner memory pw = PastWinner({
+                epochId: currentEpochId,
+                timestamp: uint64(block.timestamp),
+                winningPoolId: winningPoolId,
+                poolCreator: pools[winningPoolId].creator,
+                totalPrizeNormalized: totalPrize
+            });
+            pastWinners[idx] = pw;
+            pastWinnersCount++;
+            emit PastWinnerRecorded(currentEpochId, winningPoolId, pw.poolCreator, totalPrize);
+        }
 
         // Start next epoch - Friday noon for production, interval-aligned for testing
         uint256 nextEpochId = currentEpochId + 1;
@@ -700,14 +782,14 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     }
 
     function _updateUserRewards(address token, uint256 poolId, address user) internal {
-        Pool storage pool = pools[poolId];
         UserPosition storage pos = positions[token][poolId][user];
 
-        uint256 deltaIndex = pool.rewardIndex - pos.rewardIndexPaid;
+        uint256 currentIndex = poolTokenRewardIndex[token][poolId];
+        uint256 deltaIndex = currentIndex - pos.rewardIndexPaid;
         if (deltaIndex > 0 && pos.deposits > 0) {
             pos.pendingPrize += (pos.deposits * deltaIndex) / 1e18;
         }
-        pos.rewardIndexPaid = pool.rewardIndex;
+        pos.rewardIndexPaid = currentIndex;
     }
 
     function _accrueAllPools() internal {

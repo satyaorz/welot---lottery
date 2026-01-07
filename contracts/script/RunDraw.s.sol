@@ -12,11 +12,13 @@ import {MockEntropyV2} from "../src/mocks/MockEntropyV2.sol";
 /// Env vars:
 /// - WELOT_VAULT
 /// - ENTROPY
+/// - MOCK_ENTROPY (optional, bool; defaults to true)
 /// - RANDOM_WORD (optional, uint256; defaults to 1)
 contract RunDrawScript is Script {
     function run() external {
         address vaultAddr = vm.envAddress("WELOT_VAULT");
         address entropyAddr = vm.envAddress("ENTROPY");
+        bool mockEntropyMode = vm.envOr("MOCK_ENTROPY", true);
         uint256 randomWord = vm.envOr("RANDOM_WORD", uint256(1));
 
         WelotVault vault = WelotVault(payable(vaultAddr));
@@ -35,12 +37,18 @@ contract RunDrawScript is Script {
         uint64 seq;
         uint256 epochId = vault.currentEpochId();
         try vault.requestRandomness() {
-            (uint64 sstart, uint64 send, WelotVault.EpochStatus sstatus, uint64 sentropySequence, bytes32 srandomness, uint256 sprize, uint256 swinningPoolId) = vault.epochs(epochId);
-            seq = sentropySequence;
+            (,,, uint64 entropySequence,,,) = vault.epochs(epochId);
+            seq = entropySequence;
             console2.log("requestRandomness() ok, epoch:", epochId);
             console2.log("entropySequence:", uint256(seq));
         } catch {
             console2.log("requestRandomness() reverted (maybe already requested)");
+        }
+
+        if (!mockEntropyMode) {
+            console2.log("MOCK_ENTROPY=false; waiting for real Entropy callback, skipping local fulfill/finalize");
+            vm.stopBroadcast();
+            return;
         }
 
         if (seq == 0) {
