@@ -1,19 +1,19 @@
 # Mantle Sepolia Testing Notes (Welot)
 
-This repo supports a **full end-to-end test flow** on Mantle Sepolia by deploying mocks (tokens, ERC4626 yield vaults, faucet, entropy) plus the `WelotVault`.
+This repo supports a **full end-to-end test flow** on Mantle Sepolia by deploying mocks (tokens, ERC4626 yield vaults, faucet) plus the `WelotVault`.
+Randomness can come from **real Pyth Entropy** (default) or an **on-chain mock** (opt-in).
 
 ## What we deployed on Mantle Sepolia
 
 Deployed via `contracts/script/DeployMantle.s.sol` (chainId `5003`). For testnet we deploy:
 
 - `WelotVault`
-  - **Draw interval**: `2 hours` (test-only)
-  - **Schedule**: epochs end on the next UTC-aligned 2-hour boundary (00:00, 02:00, 04:00, ...)
+  - **Draw interval**: `7 days`
+  - **Schedule**: **Friday 12:00 UTC** ("Friday noon")
   - **Max pools**: `64`
-- `MockEntropyV2`
-  - Acts as an on-chain stand-in for Pyth Entropy/VRF on testnet
-  - `getFeeV2()` returns `0` by default (free)
-  - Randomness is fulfilled by calling `fulfill(...)` on the mock
+- Entropy provider
+  - Default: real Pyth Entropy (as configured in `contracts/script/DeployMantle.s.sol`)
+  - Optional: `MockEntropyV2` if you deploy with `DEPLOY_MOCK_ENTROPY=true`
 - `MockERC20` tokens: `USDe` (18), `USDC` (6), `mETH` (18)
 - `MockERC4626` yield vaults: `sUSDe`, `sUSDC`, `smETH`
   - Auto-accrues yield over time (see “Auto-yield mock” below)
@@ -52,16 +52,14 @@ After changing `frontend/.env.local`, restart the dev server so Next inlines the
 4. `finalizeDraw()`
    - Picks a winning pool and distributes rewards via `rewardIndex`
 
-### Testnet difference: entropy is a mock
+### Testnet randomness options
 
-On testnet we deploy `MockEntropyV2`, which does **not** auto-fulfill.
-To complete the flow:
-
-- Call `requestRandomness()` on `WelotVault`
-- Then call `MockEntropyV2.fulfill(sequenceNumber, randomBytes32)`
-- Then call `finalizeDraw()`
-
-This is intentionally deterministic/controllable for testing.
+- **Real Pyth Entropy (default)**
+  - Call `requestRandomness()` and wait for the provider callback (`entropyCallback`).
+  - Once randomness is ready, call `finalizeDraw()`.
+- **Mock entropy (opt-in)**
+  - Deploy with `DEPLOY_MOCK_ENTROPY=true`.
+  - Then you can deterministically fulfill locally by calling `MockEntropyV2.fulfill(...)`.
 
 ## Automation (production-grade on Mantle)
 
@@ -70,7 +68,7 @@ Chainlink Automation is not available on Mantle in many environments, so product
 Recommended production checklist:
 
 - Run an off-chain keeper that periodically calls `checkUpkeep` and (when needed) submits `performUpkeep(performData)`.
-- With a 2-hour interval, the contract aligns epoch ends to UTC 2-hour boundaries (even hours).
+- With a 7-day interval, epochs end at Friday 12:00 UTC.
 - Set `automationForwarder` on the vault to your keeper wallet (recommended) using `setAutomationForwarder(<keeper_wallet>)`. This prevents arbitrary callers from running upkeep.
 - Use the official Pyth Entropy contract address for your target chain as the `IEntropyV2` provider; set that address in the deploy script for mainnet.
 - Ensure the vault is funded with enough native currency to pay any entropy fees (`entropy.getFeeV2()`). Top up the contract as part of deployment or via a guardian script.
@@ -145,8 +143,8 @@ For production, replace the mocks with real integrations:
     - call `finalizeDraw()` once randomness is ready
 
 - **Timing**
-  - The testnet deploy uses `2 hours` for fast iteration.
-  - Production should use a longer interval (e.g. `7 days`) and a robust schedule.
+  - Testnet and production both use a weekly cadence in this repo.
+  - If you want a faster local demo cadence, deploy to Anvil or modify the deploy script.
 
 ## Commands used
 
@@ -158,6 +156,12 @@ set -a
 source .env
 set +a
 forge script script/DeployMantle.s.sol:DeployMantleScript --rpc-url "$MANTLE_SEPOLIA_RPC_URL" --private-key "$PRIVATE_KEY" --broadcast
+
+# Optional: deploy with an on-chain mock entropy (deterministic draw testing)
+# DEPLOY_MOCK_ENTROPY=true forge script ...
+
+# Optional: override entropy address (if Pyth address changes)
+# ENTROPY_ADDRESS=0x... forge script ...
 ```
 
 Run the frontend:

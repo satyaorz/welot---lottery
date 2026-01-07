@@ -2,8 +2,11 @@ name: Keeper
 
 on:
   schedule:
-    # Run every Friday at 12:05 UTC (5 minutes after draw time to allow for block propagation)
-    - cron: '5 12 * * 5'
+    # Run on Fridays shortly after noon UTC and keep retrying for ~2 hours.
+    # Needed because: (1) upkeep is sequential (close -> request -> finalize) and
+    # (2) real Entropy callback can arrive minutes after the request.
+    - cron: '5-59/10 12 * * 5'
+    - cron: '0-59/10 13 * * 5'
   workflow_dispatch:
     inputs:
       once:
