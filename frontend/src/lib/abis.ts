@@ -13,11 +13,12 @@ export const welotVaultAbi = [
     ],
     outputs: [],
   },
+
   {
     type: "function",
-    name: "createPool",
-    stateMutability: "nonpayable",
-    inputs: [],
+    name: "assignedPoolId",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
     outputs: [{ name: "poolId", type: "uint256" }],
   },
 
@@ -200,9 +201,7 @@ export const welotVaultAbi = [
     inputs: [{ name: "poolId", type: "uint256" }],
     outputs: [
       { name: "exists", type: "bool" },
-      { name: "creator", type: "address" },
       { name: "totalDeposits", type: "uint256" },
-      { name: "rewardIndex", type: "uint256" },
       { name: "cumulative", type: "uint256" },
       { name: "lastTimestamp", type: "uint64" },
       { name: "lastBalance", type: "uint256" },
@@ -237,11 +236,20 @@ export const welotVaultAbi = [
           { name: "epochId", type: "uint256" },
           { name: "timestamp", type: "uint64" },
           { name: "winningPoolId", type: "uint256" },
-          { name: "poolCreator", type: "address" },
           { name: "totalPrizeNormalized", type: "uint256" },
         ],
       },
     ],
+  },
+  {
+    type: "function",
+    name: "poolTokenDeposits",
+    stateMutability: "view",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "poolId", type: "uint256" },
+    ],
+    outputs: [{ name: "deposits", type: "uint256" }],
   },
   {
     type: "function",
@@ -325,7 +333,6 @@ export const welotVaultAbi = [
     inputs: [
       { name: "epochId", type: "uint256", indexed: true },
       { name: "winningPoolId", type: "uint256", indexed: true },
-      { name: "poolCreator", type: "address", indexed: true },
       { name: "totalPrizeNormalized", type: "uint256", indexed: false },
     ],
   },

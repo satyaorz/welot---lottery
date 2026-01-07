@@ -11,8 +11,8 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {IEntropyV2} from "../src/interfaces/IEntropyV2.sol";
 
 contract WelotVaultTest is Test {
-    MockERC20 usde;
-    MockERC4626 susde;
+    MockERC20 usdc;
+    MockERC4626 susdc;
     MockEntropyV2 entropy;
     WelotVault vault;
 
@@ -24,11 +24,11 @@ contract WelotVaultTest is Test {
     address owner = address(this);
 
     function setUp() public {
-        // Deploy mock tokens
-        usde = new MockERC20("USDe", "USDe", 18);
-        susde = new MockERC4626(usde, "sUSDe", "sUSDe", 18);
+        // Deploy mock tokens (USDC with 6 decimals)
+        usdc = new MockERC20("USDC", "USDC", 6);
+        susdc = new MockERC4626(usdc, "sUSDC", "sUSDC", 6);
         // Unit tests expect prize growth only when explicitly donated.
-        susde.setYieldRatePerSecond(0);
+        susdc.setYieldRatePerSecond(0);
 
         // Deploy mock entropy
         entropy = new MockEntropyV2();
@@ -37,11 +37,11 @@ contract WelotVaultTest is Test {
         vault = new WelotVault(
             IEntropyV2(address(entropy)),
             7 days,  // Weekly draws
-            64       // Max pools
+            10       // Fixed 10 pools (auto-assigned)
         );
 
-        // Configure USDe as a supported token using addSupportedToken
-        vault.addSupportedToken(address(usde), IERC4626(address(susde)));
+        // Configure USDC as a supported token using addSupportedToken
+        vault.addSupportedToken(address(usdc), IERC4626(address(susdc)));
 
         // Mint and approve for participants
         _mintApprove(alice);
@@ -52,9 +52,9 @@ contract WelotVaultTest is Test {
     }
 
     function _mintApprove(address user) internal {
-        usde.mint(user, 1_000e18);
+        usdc.mint(user, 1_000e6);
         vm.prank(user);
-        usde.approve(address(vault), type(uint256).max);
+        usdc.approve(address(vault), type(uint256).max);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -62,24 +62,24 @@ contract WelotVaultTest is Test {
     // ═══════════════════════════════════════════════════════════════════════════
 
     function test_ConfigureToken() public view {
-        (bool enabled, , uint8 decimals, , ) = vault.tokenConfigs(address(usde));
+        (bool enabled, , uint8 decimals, , ) = vault.tokenConfigs(address(usdc));
         assertTrue(enabled);
-        assertEq(decimals, 18);
+        assertEq(decimals, 6);
     }
 
     function test_AddSupportedToken_OnlyOwner() public {
-        MockERC20 usdc = new MockERC20("USDC", "USDC", 6);
-        MockERC4626 susdc = new MockERC4626(usdc, "sUSDC", "sUSDC", 6);
+        MockERC20 usdt = new MockERC20("USDT", "USDT", 6);
+        MockERC4626 susdt = new MockERC4626(usdt, "sUSDT", "sUSDT", 6);
         
         vm.prank(alice);
         vm.expectRevert();
-        vault.addSupportedToken(address(usdc), IERC4626(address(susdc)));
+        vault.addSupportedToken(address(usdt), IERC4626(address(susdt)));
     }
 
     function test_GetSupportedTokens() public view {
         address[] memory tokens = vault.getSupportedTokens();
         assertEq(tokens.length, 1);
-        assertEq(tokens[0], address(usde));
+        assertEq(tokens[0], address(usdc));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -88,35 +88,35 @@ contract WelotVaultTest is Test {
 
     function test_Deposit() public {
         vm.prank(alice);
-        vault.deposit(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
 
-        (uint256 deposits, uint256 claimable) = vault.userPosition(address(usde), alice);
-        assertEq(deposits, 100e18);
+        (uint256 deposits, uint256 claimable) = vault.userPosition(address(usdc), alice);
+        assertEq(deposits, 100e6);
         assertEq(claimable, 0);
     }
 
     function test_Deposit_Multiple() public {
         vm.prank(alice);
-        vault.deposit(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
         
         vm.prank(bob);
-        vault.deposit(address(usde), 200e18);
+        vault.deposit(address(usdc), 200e6);
 
-        assertEq(vault.totalDeposits(address(usde)), 300e18);
+        assertEq(vault.totalDeposits(address(usdc)), 300e6);
     }
 
     function test_Deposit_DisabledToken() public {
-        MockERC20 fake = new MockERC20("FAKE", "FAKE", 18);
+        MockERC20 fake = new MockERC20("FAKE", "FAKE", 6);
         
         vm.prank(alice);
         vm.expectRevert(WelotVault.TokenNotSupported.selector);
-        vault.deposit(address(fake), 100e18);
+        vault.deposit(address(fake), 100e6);
     }
 
     function test_Deposit_ZeroAmount() public {
         vm.prank(alice);
         vm.expectRevert(WelotVault.ZeroAmount.selector);
-        vault.deposit(address(usde), 0);
+        vault.deposit(address(usdc), 0);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -125,30 +125,30 @@ contract WelotVaultTest is Test {
 
     function test_Withdraw() public {
         vm.startPrank(alice);
-        vault.deposit(address(usde), 100e18);
-        vault.withdraw(address(usde), 50e18);
+        vault.deposit(address(usdc), 100e6);
+        vault.withdraw(address(usdc), 50e6);
         vm.stopPrank();
 
-        (uint256 deposits, ) = vault.userPosition(address(usde), alice);
-        assertEq(deposits, 50e18);
-        assertEq(usde.balanceOf(alice), 950e18); // 1000 - 100 + 50
+        (uint256 deposits, ) = vault.userPosition(address(usdc), alice);
+        assertEq(deposits, 50e6);
+        assertEq(usdc.balanceOf(alice), 950e6); // 1000 - 100 + 50
     }
 
     function test_Withdraw_Full() public {
         vm.startPrank(alice);
-        vault.deposit(address(usde), 100e18);
-        vault.withdraw(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
+        vault.withdraw(address(usdc), 100e6);
         vm.stopPrank();
 
-        (uint256 deposits, ) = vault.userPosition(address(usde), alice);
+        (uint256 deposits, ) = vault.userPosition(address(usdc), alice);
         assertEq(deposits, 0);
     }
 
     function test_Withdraw_ExceedsBalance() public {
         vm.startPrank(alice);
-        vault.deposit(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
         vm.expectRevert(WelotVault.InsufficientBalance.selector);
-        vault.withdraw(address(usde), 150e18);
+        vault.withdraw(address(usdc), 150e6);
         vm.stopPrank();
     }
 
@@ -177,25 +177,25 @@ contract WelotVaultTest is Test {
     function test_FullLotteryFlow() public {
         // 1. Multiple users deposit
         vm.prank(alice);
-        vault.deposit(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
         vm.prank(bob);
-        vault.deposit(address(usde), 200e18);
+        vault.deposit(address(usdc), 200e6);
         vm.prank(carol);
-        vault.deposit(address(usde), 300e18);
+        vault.deposit(address(usdc), 300e6);
         vm.prank(dave);
-        vault.deposit(address(usde), 400e18);
+        vault.deposit(address(usdc), 400e6);
         vm.prank(erin);
-        vault.deposit(address(usde), 500e18);
+        vault.deposit(address(usdc), 500e6);
 
-        assertEq(vault.totalDeposits(address(usde)), 1500e18);
+        assertEq(vault.totalDeposits(address(usdc)), 1500e6);
 
-        // 2. Generate yield (donate to sUSDe mock)
-        usde.mint(address(this), 100e18);
-        usde.approve(address(susde), type(uint256).max);
-        susde.donateYield(100e18);
+        // 2. Generate yield (donate to sUSDC mock)
+        usdc.mint(address(this), 100e6);
+        usdc.approve(address(susdc), type(uint256).max);
+        susdc.donateYield(100e6);
 
         // Check prize pool includes yield (use approx due to ERC4626 rounding)
-        assertApproxEqAbs(vault.prizePool(address(usde)), 100e18, 1e15);
+        assertApproxEqAbs(vault.prizePool(address(usdc)), 100e6, 1e3);
 
         // 3. Warp to after epoch end (Friday noon)
         vm.warp(block.timestamp + 8 days);
@@ -230,24 +230,24 @@ contract WelotVaultTest is Test {
         users[4] = erin;
 
         for (uint256 i = 0; i < users.length; i++) {
-            (, uint256 claimable) = vault.userPosition(address(usde), users[i]);
+            (, uint256 claimable) = vault.userPosition(address(usdc), users[i]);
             totalClaimable += claimable;
         }
 
         // The entire prize pool should be claimable by winner(s)
         // Use approximate equality due to ERC4626 rounding
-        assertApproxEqAbs(totalClaimable, 100e18, 1e15);
+        assertApproxEqAbs(totalClaimable, 100e6, 1e3);
     }
 
     function test_ClaimPrize() public {
         // Setup: deposit, generate yield, complete lottery
         vm.prank(alice);
-        vault.deposit(address(usde), 1000e18);
+        vault.deposit(address(usdc), 1000e6);
 
         // Generate yield
-        usde.mint(address(this), 50e18);
-        usde.approve(address(susde), type(uint256).max);
-        susde.donateYield(50e18);
+        usdc.mint(address(this), 50e6);
+        usdc.approve(address(susdc), type(uint256).max);
+        susdc.donateYield(50e6);
 
         // Complete epoch
         vm.warp(block.timestamp + 8 days);
@@ -264,18 +264,18 @@ contract WelotVaultTest is Test {
         vault.finalizeDraw();
 
         // Alice should have won (only depositor)
-        (, uint256 claimable) = vault.userPosition(address(usde), alice);
-        assertApproxEqAbs(claimable, 50e18, 1e15);
+        (, uint256 claimable) = vault.userPosition(address(usdc), alice);
+        assertApproxEqAbs(claimable, 50e6, 1e3);
 
         // Claim prize
-        uint256 balanceBefore = usde.balanceOf(alice);
+        uint256 balanceBefore = usdc.balanceOf(alice);
         vm.prank(alice);
-        vault.claimPrize(address(usde));
+        vault.claimPrize(address(usdc));
         
-        assertApproxEqAbs(usde.balanceOf(alice), balanceBefore + 50e18, 1e15);
+        assertApproxEqAbs(usdc.balanceOf(alice), balanceBefore + 50e6, 1e3);
         
         // Claimable should now be 0
-        (, uint256 claimableAfter) = vault.userPosition(address(usde), alice);
+        (, uint256 claimableAfter) = vault.userPosition(address(usdc), alice);
         assertEq(claimableAfter, 0);
     }
 
@@ -306,7 +306,7 @@ contract WelotVaultTest is Test {
 
         vm.prank(alice);
         vm.expectRevert();
-        vault.deposit(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
     }
 
     function test_Unpause() public {
@@ -315,7 +315,7 @@ contract WelotVaultTest is Test {
         assertFalse(vault.paused());
 
         vm.prank(alice);
-        vault.deposit(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -325,7 +325,7 @@ contract WelotVaultTest is Test {
     function test_NoPrize_NothingToClaim() public {
         // Deposit but no yield generated
         vm.prank(alice);
-        vault.deposit(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
 
         // Complete epoch with no yield
         vm.warp(block.timestamp + 8 days);
@@ -341,35 +341,35 @@ contract WelotVaultTest is Test {
         vault.finalizeDraw();
 
         // No claimable since no yield was generated
-        (, uint256 claimable) = vault.userPosition(address(usde), alice);
+        (, uint256 claimable) = vault.userPosition(address(usdc), alice);
         assertEq(claimable, 0);
     }
 
     function test_MultipleDeposits_SameUser() public {
         vm.startPrank(alice);
-        vault.deposit(address(usde), 100e18);
-        vault.deposit(address(usde), 50e18);
-        vault.deposit(address(usde), 25e18);
+        vault.deposit(address(usdc), 100e6);
+        vault.deposit(address(usdc), 50e6);
+        vault.deposit(address(usdc), 25e6);
         vm.stopPrank();
 
-        (uint256 deposits, ) = vault.userPosition(address(usde), alice);
-        assertEq(deposits, 175e18);
+        (uint256 deposits, ) = vault.userPosition(address(usdc), alice);
+        assertEq(deposits, 175e6);
     }
 
     function test_WithdrawDuringEpoch() public {
         // Deposit
         vm.prank(alice);
-        vault.deposit(address(usde), 100e18);
+        vault.deposit(address(usdc), 100e6);
 
         // Warp to mid-epoch
         vm.warp(block.timestamp + 3 days);
 
         // Should still be able to withdraw
         vm.prank(alice);
-        vault.withdraw(address(usde), 50e18);
+        vault.withdraw(address(usdc), 50e6);
 
-        (uint256 deposits, ) = vault.userPosition(address(usde), alice);
-        assertEq(deposits, 50e18);
+        (uint256 deposits, ) = vault.userPosition(address(usdc), alice);
+        assertEq(deposits, 50e6);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

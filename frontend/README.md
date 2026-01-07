@@ -19,53 +19,47 @@ forge script script/DeployLocal.s.sol:DeployLocalScript \
   --broadcast
 ```
 
-Copy the printed `NEXT_PUBLIC_*` env vars from the output.
+The deploy script prints `NEXT_PUBLIC_*` environment variables for the frontend. The frontend configuration is populated from those values.
 
-### 3. Configure frontend
+Frontend setup (example):
 
 ```bash
 cd frontend
 cp .env.example .env.local
-# Paste the env vars from step 2
-```
-
-### 4. Install dependencies & run
-
-```bash
+# Populate .env.local with the `NEXT_PUBLIC_*` values from the deploy output
 npm install
 npm run dev
 ```
 
-Open http://localhost:3000
+The frontend is served at http://localhost:3000 when the dev server is running.
 
 ## Features
 
 - **No-loss design**: Only yield goes to prizes; your deposits are always safe
-- **Multi-token support**: Deposit USDe, USDC, mETH, or any configured token
+- **Multi-token support**: Deposit USDC, USDT, or any configured stablecoin
 - **Token selector**: Choose which token pool to participate in
 - **Weekly draws**: Automated prize distribution every Friday at noon UTC
 - **Automation**: Keeper-based draw execution (cron/relayer, Gelato, Defender, etc.)
 
 ## Keeper (Mantle)
 
-This repo includes an off-chain keeper that calls `checkUpkeep` and then submits `performUpkeep(performData)` when needed.
+An off-chain keeper is included. The keeper polls `checkUpkeep` and submits `performUpkeep(performData)` when on-chain conditions require action.
+
+Keeper environment (required):
 
 ```bash
-cd frontend
-
-export RPC_URL=https://rpc.sepolia.mantle.xyz
-export CHAIN_ID=5003
-export WELOT_VAULT=0xYourVault
-export PRIVATE_KEY=0xyour_keeper_private_key
-
-npm run keeper
+RPC_URL=
+CHAIN_ID=5003
+WELOT_VAULT=0x8cdEcB86577BA93709C05B32474667a1C1360988
+PRIVATE_KEY=<keeper_private_key>    # provided via shell env or CI secret
 ```
 
-The keeper simply follows the contract’s `checkUpkeep` → `performUpkeep` flow. You can poll frequently (e.g. every 30s); it will only send a tx when `upkeepNeeded=true`.
+The keeper implements two operational safeguards:
 
-Notes:
-- If the owner sets `automationForwarder` on the vault, the keeper must run from that same address.
-- Draw execution is multi-step: close epoch → request randomness → finalize once the Entropy callback arrives.
+- The vault must hold sufficient native balance to pay Entropy fees. When the epoch is `Closed` but the vault balance is insufficient, `checkUpkeep` returns `upkeepNeeded=false` to avoid revert loops; the repository keeper may top up the vault and retry.
+- If the owner configures `automationForwarder`, only the forwarder address may call `performUpkeep`; the keeper aborts if the configured forwarder differs from the keeper EOA.
+
+Draw execution proceeds in three steps: close epoch → request randomness → finalize after the entropy callback.
 
 ## Mantle Sepolia (5003) deployment
 
@@ -87,13 +81,29 @@ NEXT_PUBLIC_ENTROPY=0x...
 NEXT_PUBLIC_FAUCET=0x...
 
 # Tokens (addresses)
-NEXT_PUBLIC_USDE=0x...
-NEXT_PUBLIC_SUSDE=0x...
 NEXT_PUBLIC_USDC=0x...
 NEXT_PUBLIC_SUSDC=0x...
-NEXT_PUBLIC_METH=0x...
-NEXT_PUBLIC_SMETH=0x...
+NEXT_PUBLIC_USDT=0x...
+NEXT_PUBLIC_SUSDT=0x...
 ```
+
+Current Mantle Sepolia deployment (present):
+
+```dotenv
+NEXT_PUBLIC_CHAIN_ID=5003
+NEXT_PUBLIC_RPC_URL=
+
+NEXT_PUBLIC_WELOT_VAULT=0x8cdEcB86577BA93709C05B32474667a1C1360988
+NEXT_PUBLIC_ENTROPY=0x98046Bd286715D3B0BC227Dd7a956b83D8978603
+NEXT_PUBLIC_FAUCET=0xfC02B04FacbFD3D1b9E1C037A9d867f055BDA9CE
+
+NEXT_PUBLIC_USDC=0xCEc970693C0FdEA3BE7a9b2BF68bF4651f27e25A
+NEXT_PUBLIC_SUSDC=0x860967abD2319Ed238C5aEf085743afCb4227036
+NEXT_PUBLIC_USDT=0xe02199dE8111645135873fA38157EA7B5D7423eC
+NEXT_PUBLIC_SUSDT=0x7C2380BF55D4E23707a7f0708bdAD8faa8d1D254
+```
+
+Do not put private keys in `frontend/.env.local`. Keeper keys must be provided via shell env vars or CI/GitHub Actions secrets.
 
 ## Test Mode
 
@@ -134,9 +144,9 @@ frontend/
 - **Viem** - Ethereum interactions
 - **TypeScript** - Type safety
 
-## Icons
+## Built
 
-Icons from [Twemoji](https://twemoji.twitter.com/) (CC-BY 4.0), stored locally in `/public/icons/`.
+built during mantle gloabal hackathon :heart:
 
 ## License
 

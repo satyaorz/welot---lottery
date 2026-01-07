@@ -25,7 +25,7 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     enum EpochStatus {
         Open,           // Accepting deposits
-        Closed,         // Draw period started, no more deposits for this epoch
+        Closed,         // Draw period started; draw lifecycle proceeds from here
         RandomnessRequested, // Waiting for VRF/Entropy callback
         RandomnessReady      // Random number received, ready to finalize
     }
@@ -42,14 +42,10 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     struct Pool {
         bool exists;
-        address creator;
-        // NOTE: `totalDeposits` and `rewardIndex` are not used for prize accounting.
-        // Prize accounting is token-specific and tracked via `poolTokenDeposits` and
-        // `poolTokenRewardIndex`.
-        // `totalDeposits` is repurposed as the pool's *normalized* balance (18 decimals)
+        // NOTE: `totalDeposits` is the pool's *normalized* balance (18 decimals)
         // for winner-weighting via time-weighted deposits.
+        // Prize accounting is token-specific via `poolTokenDeposits` and `poolTokenRewardIndex`.
         uint256 totalDeposits;
-        uint256 rewardIndex;
         uint256 cumulative;
         uint64 lastTimestamp;
         uint256 lastBalance;
@@ -73,7 +69,6 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         uint256 epochId;
         uint64 timestamp;
         uint256 winningPoolId;
-        address poolCreator;
         uint256 totalPrizeNormalized; // 18 decimals
     }
 
@@ -133,14 +128,14 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     event TokenAdded(address indexed token, address indexed yieldVault);
     event TokenRemoved(address indexed token);
-    event PoolCreated(uint256 indexed poolId, address indexed creator);
+    event PoolCreated(uint256 indexed poolId);
     event Deposited(address indexed user, address indexed token, uint256 indexed poolId, uint256 amount);
     event Withdrawn(address indexed user, address indexed token, uint256 indexed poolId, uint256 amount);
     event DrawStarted(uint256 indexed epochId);
     event RandomnessRequested(uint256 indexed epochId, uint64 sequenceNumber);
     event RandomnessReceived(uint256 indexed epochId, bytes32 randomness);
     event WinnerSelected(uint256 indexed epochId, uint256 indexed winningPoolId, uint256 prize);
-    event PastWinnerRecorded(uint256 indexed epochId, uint256 indexed winningPoolId, address indexed poolCreator, uint256 totalPrizeNormalized);
+    event PastWinnerRecorded(uint256 indexed epochId, uint256 indexed winningPoolId, uint256 totalPrizeNormalized);
     event TokenPrizeRecorded(uint256 indexed epochId, address indexed token, uint256 prize);
     event PrizeClaimed(address indexed user, address indexed token, uint256 indexed poolId, uint256 amount);
     event AutomationForwarderSet(address indexed forwarder);
@@ -160,6 +155,7 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     error TokenAlreadySupported();
     error InvalidToken();
     error InsufficientFee();
+    error InvalidAssignedPool();
 
     // ══════════════════════════════════════════════════════════════════════════════
     // CONSTRUCTOR
@@ -191,8 +187,11 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
             winningPoolId: 0
         });
 
-        // Create default pool
-        _createPool(msg.sender);
+        // Create a fixed set of pools up-front. Pool assignment is deterministic,
+        // so pool creation is disabled after deployment.
+        for (uint256 i = 0; i < maxPools_; i++) {
+            _createPool();
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════════
@@ -260,9 +259,14 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         _unpause();
     }
 
-    /// @notice Create a new pool
-    function createPool() external returns (uint256 poolId) {
-        return _createPool(msg.sender);
+    /// @notice Deterministically assign a user to one of the pre-created pools.
+    /// @dev Uses the current `poolIds` array so assignment remains valid even if
+    ///      pool ids are non-sequential (though this deployment creates 1..N).
+    function assignedPoolId(address user) public view returns (uint256) {
+        uint256 len = poolIds.length;
+        if (len == 0) return 0;
+        uint256 idx = uint256(uint160(user)) % len;
+        return poolIds[idx];
     }
 
     // ══════════════════════════════════════════════════════════════════════════════
@@ -407,12 +411,13 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     // CONVENIENCE VIEW FUNCTIONS (for frontend/tests)
     // ══════════════════════════════════════════════════════════════════════════════
 
-    /// @notice Get user position for the default pool (1)
+    /// @notice Get user position for the user's assigned pool
     /// @dev Convenience wrapper for getUserPosition
     function userPosition(address token, address user) external view returns (uint256 deposited, uint256 claimable) {
-        UserPosition storage pos = positions[token][1][user];
+        uint256 poolId = assignedPoolId(user);
+        UserPosition storage pos = positions[token][poolId][user];
         deposited = pos.deposits;
-        claimable = _pendingPrize(token, 1, user);
+        claimable = _pendingPrize(token, poolId, user);
     }
 
     /// @notice Total deposits for a token (sum across all pools)
@@ -458,56 +463,14 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         return out;
     }
 
-    /// @notice Configure a token (add or update)
-    /// @dev Convenience method that combines add/update logic
-    function configureToken(address token, address yieldVault, bool enabled, uint8 decimals) external onlyOwner {
-        if (token == address(0)) revert InvalidToken();
-        
-        TokenConfig storage config = tokenConfigs[token];
-        
-        if (!config.enabled && enabled) {
-            // Adding new token
-            IERC4626 vault = IERC4626(yieldVault);
-            if (address(vault.asset()) != token) revert InvalidToken();
-            
-            config.enabled = true;
-            config.yieldVault = vault;
-            config.decimals = decimals;
-            config.totalDeposits = 0;
-            config.totalUnclaimedPrizes = 0;
-            
-            supportedTokens.push(token);
-            IERC20(token).forceApprove(yieldVault, type(uint256).max);
-            
-            emit TokenAdded(token, yieldVault);
-        } else if (config.enabled && !enabled) {
-            // Disabling token
-            require(config.totalDeposits == 0, "Has deposits");
-            config.enabled = false;
-            
-            // Remove from array
-            for (uint256 i = 0; i < supportedTokens.length; i++) {
-                if (supportedTokens[i] == token) {
-                    supportedTokens[i] = supportedTokens[supportedTokens.length - 1];
-                    supportedTokens.pop();
-                    break;
-                }
-            }
-            emit TokenRemoved(token);
-        }
-        // If already enabled, just update decimals
-        if (enabled) {
-            config.decimals = decimals;
-        }
-    }
-
     // ══════════════════════════════════════════════════════════════════════════════
     // USER ACTIONS
     // ══════════════════════════════════════════════════════════════════════════════
 
     /// @notice Deposit tokens to the default pool
     function deposit(address token, uint256 amount) external whenNotPaused {
-        depositTo(token, amount, 1, msg.sender);
+        uint256 poolId = assignedPoolId(msg.sender);
+        depositTo(token, amount, poolId, msg.sender);
     }
 
     /// @notice Deposit tokens to a specific pool
@@ -515,6 +478,8 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         public nonReentrant whenNotPaused 
     {
         if (amount == 0) revert ZeroAmount();
+        uint256 assigned = assignedPoolId(recipient);
+        if (poolId != assigned) revert InvalidAssignedPool();
         if (!pools[poolId].exists) revert PoolDoesNotExist();
         
         TokenConfig storage config = tokenConfigs[token];
@@ -541,12 +506,15 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     /// @notice Withdraw tokens from the default pool
     function withdraw(address token, uint256 amount) external {
-        withdrawFrom(token, amount, 1);
+        uint256 poolId = assignedPoolId(msg.sender);
+        withdrawFrom(token, amount, poolId);
     }
 
     /// @notice Withdraw tokens from a specific pool
     function withdrawFrom(address token, uint256 amount, uint256 poolId) public nonReentrant {
         if (amount == 0) revert ZeroAmount();
+        uint256 assigned = assignedPoolId(msg.sender);
+        if (poolId != assigned) revert InvalidAssignedPool();
         if (!pools[poolId].exists) revert PoolDoesNotExist();
 
         TokenConfig storage config = tokenConfigs[token];
@@ -574,11 +542,14 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     /// @notice Claim prize from the default pool
     function claimPrize(address token) external returns (uint256) {
-        return claimPrizeFrom(token, 1);
+        uint256 poolId = assignedPoolId(msg.sender);
+        return claimPrizeFrom(token, poolId);
     }
 
     /// @notice Claim prize from a specific pool
     function claimPrizeFrom(address token, uint256 poolId) public nonReentrant returns (uint256 prize) {
+        uint256 assigned = assignedPoolId(msg.sender);
+        if (poolId != assigned) revert InvalidAssignedPool();
         if (!pools[poolId].exists) revert PoolDoesNotExist();
 
         TokenConfig storage config = tokenConfigs[token];
@@ -610,6 +581,9 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         }
 
         if (e.status == EpochStatus.Closed) {
+            // Avoid keeper revert-loops when the vault is unfunded for the Entropy fee.
+            uint256 fee = entropy.getFeeV2();
+            if (address(this).balance < fee) return (false, "");
             return (true, abi.encode(uint8(2))); // Request randomness
         }
 
@@ -734,12 +708,11 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
                 epochId: currentEpochId,
                 timestamp: uint64(block.timestamp),
                 winningPoolId: winningPoolId,
-                poolCreator: pools[winningPoolId].creator,
                 totalPrizeNormalized: totalPrize
             });
             pastWinners[idx] = pw;
             pastWinnersCount++;
-            emit PastWinnerRecorded(currentEpochId, winningPoolId, pw.poolCreator, totalPrize);
+            emit PastWinnerRecorded(currentEpochId, winningPoolId, totalPrize);
         }
 
         // Start next epoch - Friday noon for production, interval-aligned for testing
@@ -763,22 +736,20 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     // INTERNAL
     // ══════════════════════════════════════════════════════════════════════════════
 
-    function _createPool(address creator) internal returns (uint256 poolId) {
+    function _createPool() internal returns (uint256 poolId) {
         if (poolIds.length >= maxPools) revert MaxPoolsReached();
 
         poolId = ++poolCount;
         pools[poolId] = Pool({
             exists: true,
-            creator: creator,
             totalDeposits: 0,
-            rewardIndex: 0,
             cumulative: 0,
             lastTimestamp: uint64(block.timestamp),
             lastBalance: 0
         });
 
         poolIds.push(poolId);
-        emit PoolCreated(poolId, creator);
+        emit PoolCreated(poolId);
     }
 
     function _updateUserRewards(address token, uint256 poolId, address user) internal {

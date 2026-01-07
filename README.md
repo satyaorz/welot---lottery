@@ -36,32 +36,19 @@ npm run dev
 
 Open http://localhost:3000
 
-Tip: from the repo root you can also run `npm run dev` (it proxies into `frontend/`).
+The repository root provides a convenience script `npm run dev` that proxies into `frontend/`.
 
 ## Quickstart (Mantle Sepolia testnet, 5003)
 
-### Deployed addresses (Mantle Sepolia, 5003)
+Addresses change on every redeploy.
 
-These are the most recent addresses from `contracts/broadcast/DeployMantle.s.sol/5003/run-latest.json`.
-If you redeploy, treat the deploy output as the new source of truth.
+- For the UI, treat the **deploy script output** (the printed `NEXT_PUBLIC_*` lines) as the source of truth.
+- Foundry also writes a JSON receipt under `contracts/broadcast/DeployMantle.s.sol/5003/run-latest.json`.
 
-```dotenv
-NEXT_PUBLIC_CHAIN_ID=5003
-NEXT_PUBLIC_WELOT_VAULT=0x8601C4932173571ee941fa0a26dE2379E351b164
-NEXT_PUBLIC_ENTROPY=0x98046Bd286715D3B0BC227Dd7a956b83D8978603
-NEXT_PUBLIC_FAUCET=0x8b4AFcf270A4727F377eCf8a167073B87ECa7658
-ENTROPY_ADDRESS=0x98046Bd286715D3B0BC227Dd7a956b83D8978603
+Important: keep secrets out of the frontend.
 
-# Tokens
-NEXT_PUBLIC_USDE=0x271b8d3cdc2F5aD3Cc569ECe3cFDEA79EDC806E5
-NEXT_PUBLIC_SUSDE=0x3F95B8124E51380Fbabc57ad3FbF32FD6669cDA8
-NEXT_PUBLIC_USDC=0xc3f30eA136ac7f398Cdc1fc3877DAfcF9E5B517C
-NEXT_PUBLIC_SUSDC=0xA35b6412E7e216e3EA032bb9e543bEFa5cD19152
-NEXT_PUBLIC_METH=0x4Cf52d4cfb118F04e2A76808422b2573Cf3051Cc
-NEXT_PUBLIC_SMETH=0x2b13239c4683d22F127ba7Af5B06Cb41d84f67Ad
-```
-
-`ENTROPY_ADDRESS` is used by the keeper script; the frontend uses `NEXT_PUBLIC_ENTROPY`.
+- Put RPC + deployer key in `contracts/.env`.
+- Put only `NEXT_PUBLIC_*` values in `frontend/.env.local`.
 
 ### 1) Deploy
 
@@ -75,12 +62,28 @@ forge script script/DeployMantle.s.sol:DeployMantleScript --rpc-url "$MANTLE_SEP
 
 ### 2) Run the UI
 
-Copy the printed `NEXT_PUBLIC_*` values into `frontend/.env.local`, then:
+Populate `frontend/.env.local` with the printed `NEXT_PUBLIC_*` values. The frontend is started with:
 
 ```bash
 cd frontend
 npm install
 npm run dev
+```
+
+Example `frontend/.env.local` (public values only):
+
+```dotenv
+NEXT_PUBLIC_CHAIN_ID=5003
+NEXT_PUBLIC_RPC_URL=
+
+NEXT_PUBLIC_WELOT_VAULT=0x...
+NEXT_PUBLIC_ENTROPY=0x...
+NEXT_PUBLIC_FAUCET=0x...
+
+NEXT_PUBLIC_USDC=0x...
+NEXT_PUBLIC_SUSDC=0x...
+NEXT_PUBLIC_USDT=0x...
+NEXT_PUBLIC_SUSDT=0x...
 ```
 
 ## How draws work (high level)

@@ -16,16 +16,8 @@ export interface TokenInfo {
   vaultAddress?: Address;
 }
 
-// Supported tokens configuration
+// Supported tokens configuration (USDC and USDT only - Lendle yield sources)
 export const TOKENS: Record<string, TokenInfo> = {
-  USDE: {
-    address: asAddress(optionalEnv("NEXT_PUBLIC_USDE")) ?? ("0x" as Address),
-    symbol: "USDe",
-    name: "USDe",
-    decimals: 18,
-    icon: "/icons/usde.svg",
-    vaultAddress: asAddress(optionalEnv("NEXT_PUBLIC_SUSDE")),
-  },
   USDC: {
     address: asAddress(optionalEnv("NEXT_PUBLIC_USDC")) ?? ("0x" as Address),
     symbol: "USDC",
@@ -34,13 +26,13 @@ export const TOKENS: Record<string, TokenInfo> = {
     icon: "/icons/usdc.svg",
     vaultAddress: asAddress(optionalEnv("NEXT_PUBLIC_SUSDC")),
   },
-  METH: {
-    address: asAddress(optionalEnv("NEXT_PUBLIC_METH")) ?? ("0x" as Address),
-    symbol: "mETH",
-    name: "Mantle ETH",
-    decimals: 18,
-    icon: "/icons/meth.svg",
-    vaultAddress: asAddress(optionalEnv("NEXT_PUBLIC_SMETH")),
+  USDT: {
+    address: asAddress(optionalEnv("NEXT_PUBLIC_USDT")) ?? ("0x" as Address),
+    symbol: "USDT",
+    name: "Tether USD",
+    decimals: 6,
+    icon: "/icons/usdt.svg",
+    vaultAddress: asAddress(optionalEnv("NEXT_PUBLIC_SUSDT")),
   },
 };
 
@@ -49,13 +41,6 @@ export const CONFIG = {
   vaultAddress: asAddress(optionalEnv("NEXT_PUBLIC_WELOT_VAULT")),
   entropyAddress: asAddress(optionalEnv("NEXT_PUBLIC_ENTROPY")),
   faucetAddress: asAddress(optionalEnv("NEXT_PUBLIC_FAUCET")),
-  
-  // Legacy support (for old deployments)
-  legacyFaucetAddress: asAddress(optionalEnv("NEXT_PUBLIC_USDE_FAUCET")),
-  
-  // Token addresses
-  usdeAddress: asAddress(optionalEnv("NEXT_PUBLIC_USDE")),
-  susdeAddress: asAddress(optionalEnv("NEXT_PUBLIC_SUSDE")),
 };
 
 // Get all configured tokens (those with valid addresses)
@@ -67,11 +52,9 @@ export function getConfiguredTokens(): TokenInfo[] {
 
 // Mantle mainnet token addresses (for reference)
 export const MANTLE_MAINNET_TOKENS = {
-  USDE: "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34" as Address,
-  SUSDE: "0x211Cc4DD073734dA055fbF44a2b4667d5E5fE5d2" as Address,
-  METH: "0xcDA86A272531e8640cD7F1a92c01839911B90bb0" as Address,
   USDC: "0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9" as Address,
   USDT: "0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE" as Address,
-  WETH: "0xdEAddEaDdeadDEadDEADDEAddEADDEAddead1111" as Address,
+  LENDLE_POOL: "0xCFa5aE7c2CE8Fadc6426C1ff872cA45378Fb7cF3" as Address,
 };
+
 

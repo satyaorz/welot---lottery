@@ -3,11 +3,12 @@
 import Link from "next/link";
 import Image from "next/image";
 import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import type { Address, EIP1193Provider } from "viem";
 import { formatUnits, maxUint256, parseUnits } from "viem";
 
 import { erc20Abi, faucetAbi, mockErc4626FaucetAbi, welotVaultAbi } from "@/lib/abis";
-import { getPublicClient, getWalletClient, shortAddr, getExplorerUrl } from "@/lib/clients";
+import { getPublicClient, getWalletClient, shortAddr } from "@/lib/clients";
 import { CONFIG, getConfiguredTokens, type TokenInfo } from "@/lib/config";
 import { getChain } from "@/lib/chains";
 
@@ -101,53 +102,6 @@ function TokenSelector({
         </button>
       ))}
     </div>
-  );
-}
-
-function Header({
-  connected,
-  address,
-  onConnect,
-  onDisconnect,
-}: {
-  connected: boolean;
-  address?: Address;
-  onConnect: () => void;
-  onDisconnect: () => void;
-}) {
-  return (
-    <header className="border-b-2 border-black bg-white">
-      <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-5">
-        <Link href="/" className="flex items-center gap-3">
-          <div className="we-card rounded-2xl border-2 border-black bg-white p-3 shadow-[4px_4px_0_0_#000]">
-            <Image src="/brand/logo.png" alt="welot" width={120} height={52} priority />
-          </div>
-        </Link>
-
-        <div className="flex items-center gap-3">
-          {connected && address ? (
-            <div className="flex items-center gap-3">
-              <div className="rounded-2xl border-2 border-black bg-amber-100 px-4 py-2 text-sm font-black">
-                {shortAddr(address)}
-              </div>
-              <button
-                onClick={onDisconnect}
-                className="rounded-2xl border-2 border-black bg-white px-4 py-2 text-sm font-black shadow-[3px_3px_0_0_#000]"
-              >
-                Disconnect
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={onConnect}
-              className="rounded-2xl border-2 border-black bg-zinc-950 px-6 py-2.5 text-sm font-black text-zinc-50 shadow-[3px_3px_0_0_#000]"
-            >
-              Connect Wallet
-            </button>
-          )}
-        </div>
-      </div>
-    </header>
   );
 }
 
@@ -278,15 +232,22 @@ export default function AppPage() {
   const [tokenStates, setTokenStates] = useState<Record<string, TokenState>>({});
 
   // Global state
-  const [totalDeposits, setTotalDeposits] = useState(0n);
   const [prizePool, setPrizePool] = useState(0n);
-  const [selectedTokenTotalDeposits, setSelectedTokenTotalDeposits] = useState(0n);
-  const [pastWinners, setPastWinners] = useState<
-    { epochId: bigint; winningPoolId: bigint; poolCreator: Address; totalPrizeNormalized: bigint; timestamp: bigint }[]
-  >([]);
+  type PastWinner = {
+    epochId: bigint;
+    winningPoolId: bigint;
+    totalPrizeNormalized: bigint;
+    timestamp: bigint;
+  };
+
+  const [pastWinners, setPastWinners] = useState<PastWinner[]>([]);
   const [timeUntilDraw, setTimeUntilDraw] = useState(0);
   const [epochStatus, setEpochStatus] = useState(0);
   const [epochEndTime, setEpochEndTime] = useState<number>(0);
+
+  // Pools
+  const [selectedPoolId, setSelectedPoolId] = useState<bigint>(1n);
+  const [selectedPoolTokenDeposits, setSelectedPoolTokenDeposits] = useState(0n);
 
   // UI state
   const [depositAmount, setDepositAmount] = useState("");
@@ -295,6 +256,15 @@ export default function AppPage() {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [mounted, setMounted] = useState(false);
+  const [showSimCallout, setShowSimCallout] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setShowSimCallout(true), 800);
+    return () => clearTimeout(t);
+  }, []);
+  const router = useRouter();
+
+  void router;
 
   const configOk = Boolean(CONFIG.vaultAddress);
   const faucetOk = Boolean(CONFIG.faucetAddress);
@@ -418,16 +388,31 @@ export default function AppPage() {
     try {
       const publicClient = getPublicClient();
 
-      const [pot, total, epochId, timeLeft] = await Promise.all([
+      // Pools are fixed and auto-assigned in the contract.
+      // Best-effort: if the method is missing (older deployments), fall back to pool 1.
+      let effectivePoolId = selectedPoolId;
+      if (address) {
+        try {
+          const pid = await publicClient.readContract({
+            address: CONFIG.vaultAddress!,
+            abi: welotVaultAbi,
+            functionName: "assignedPoolId",
+            args: [address],
+          });
+          if (typeof pid === "bigint" && pid > 0n) {
+            effectivePoolId = pid;
+            if (pid !== selectedPoolId) setSelectedPoolId(pid);
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const [pot, epochId, timeLeft] = await Promise.all([
         publicClient.readContract({
           address: CONFIG.vaultAddress!,
           abi: welotVaultAbi,
           functionName: "currentPrizePoolTotal",
-        }),
-        publicClient.readContract({
-          address: CONFIG.vaultAddress!,
-          abi: welotVaultAbi,
-          functionName: "totalDepositsNormalized",
         }),
         publicClient.readContract({
           address: CONFIG.vaultAddress!,
@@ -442,7 +427,6 @@ export default function AppPage() {
       ]);
 
       setPrizePool(pot);
-      setTotalDeposits(total);
 
       // Get epoch info
       const epoch = await publicClient.readContract({
@@ -465,50 +449,33 @@ export default function AppPage() {
           functionName: "getPastWinners",
           args: [10n],
         });
-        setPastWinners((rows as any[]) ?? []);
+        setPastWinners((rows as unknown as PastWinner[]) ?? []);
       } catch {
         // Older deployments may not have this method.
         setPastWinners([]);
       }
 
-      // Selected token total deposits
+      // Per-pool token deposits (pool-local stats)
       if (selectedToken) {
         try {
-          const cfg = await publicClient.readContract({
+          const poolTokenTotal = await publicClient.readContract({
             address: CONFIG.vaultAddress!,
             abi: welotVaultAbi,
-            functionName: "tokenConfigs",
-            args: [selectedToken.address],
+            functionName: "poolTokenDeposits",
+            args: [selectedToken.address, effectivePoolId ?? 1n],
           });
-          // cfg = [enabled, yieldVault, decimals, totalDeposits, totalUnclaimedPrizes]
-          setSelectedTokenTotalDeposits((cfg as any)[3] ?? 0n);
+          setSelectedPoolTokenDeposits((poolTokenTotal as bigint | undefined) ?? 0n);
         } catch {
-          setSelectedTokenTotalDeposits(0n);
+          setSelectedPoolTokenDeposits(0n);
         }
       } else {
-        setSelectedTokenTotalDeposits(0n);
+        setSelectedPoolTokenDeposits(0n);
       }
 
       // User-specific data for each token
       if (address && availableTokens.length > 0) {
         const newStates: Record<string, TokenState> = {};
-        
-        // Get first pool ID
-        const poolLen = await publicClient.readContract({
-          address: CONFIG.vaultAddress!,
-          abi: welotVaultAbi,
-          functionName: "poolIdsLength",
-        });
-
-        let poolId = 1n;
-        if (Number(poolLen) > 0) {
-          poolId = await publicClient.readContract({
-            address: CONFIG.vaultAddress!,
-            abi: welotVaultAbi,
-            functionName: "poolIds",
-            args: [0n],
-          });
-        }
+        const poolId = effectivePoolId ?? 1n;
 
         for (const token of availableTokens) {
           try {
@@ -556,7 +523,7 @@ export default function AppPage() {
     } catch (err) {
       console.error("Refresh error:", err);
     }
-  }, [configOk, address, availableTokens, selectedToken]);
+  }, [configOk, address, availableTokens, selectedToken, selectedPoolId]);
 
   const nextDrawUtc = useCallback(() => {
     if (!epochEndTime) return "";
@@ -699,6 +666,7 @@ export default function AppPage() {
       setLoading(false);
     }
   }
+
 
   async function deposit() {
     if (!connected || !address || !configOk || !depositAmount || !selectedToken) return;
@@ -934,21 +902,51 @@ export default function AppPage() {
 
       <main className="relative mx-auto w-full max-w-6xl px-6 pt-6 pb-10">
         {/* Compact top bar: logo left, wallet controls right */}
-        <div className="mb-6 flex items-center justify-between">
+        <div className="mb-6 flex items-center justify-between relative">
           <div className="flex items-center gap-3">
             <Link href="/" className="flex items-center">
               <div className="we-card rounded-2xl border-2 border-black bg-white p-2 shadow-[4px_4px_0_0_#000]">
                 <Image src="/brand/logo.png" alt="welot" width={60} height={60} priority />
               </div>
             </Link>
-            <Link 
-              href="/simulation" 
-              className="rounded-xl border-2 border-black bg-amber-100 px-3 py-1.5 text-xs font-black shadow-[2px_2px_0_0_#000] hover:bg-amber-200 transition-colors"
-            >
-              🧪 Simulation
-            </Link>
+
           </div>
-          <div>
+          <div className="flex items-center gap-3">
+            <div className="relative inline-block">
+              <Link
+                href="/simulation"
+                className={`sim-link rounded-xl border-2 border-black bg-amber-100 px-3 py-1.5 text-xs font-black shadow-[2px_2px_0_0_#000] hover:bg-amber-200 transition-colors`}
+              >
+                🧪 Simulation <span className="sim-dot ml-2 inline-block" aria-hidden></span>
+              </Link>
+
+              {showSimCallout && (
+                <div className="sim-callout absolute right-0 top-full mt-2 z-30">
+                  <div className="we-card rounded-2xl border-2 border-black bg-white p-3 shadow-[6px_6px_0_0_#000] w-80">
+                    <div className="flex items-start gap-3">
+                      <div className="text-2xl">🧪</div>
+                      <div>
+                        <div className="font-black">Try the Simulation</div>
+                        <div className="text-sm text-zinc-700 mt-1">Visualize draws, tickets, and prize evolution — safe demo mode.</div>
+                        <div className="mt-3 flex gap-2">
+                          <button
+                            onClick={() => {
+                              setShowSimCallout(false);
+                              router.push('/simulation');
+                            }}
+                            className="btn rounded-xl border-2 border-black bg-amber-100 px-3 py-1.5 text-xs font-black shadow-[2px_2px_0_0_#000]"
+                          >
+                            Open Simulation
+                          </button>
+                          <button onClick={() => setShowSimCallout(false)} className="rounded-xl border px-3 py-1 text-xs">Got it</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
             {connected && address ? (
               <div className="flex items-center gap-3">
                 <div className="rounded-2xl border-2 border-black bg-amber-100 px-4 py-2 text-sm font-black">
@@ -970,6 +968,9 @@ export default function AppPage() {
               </button>
             )}
           </div>
+
+          
+
         </div>
         {/* Y2K shapes (decor only) */}
         <div aria-hidden className="pointer-events-none absolute -top-6 -left-64 z-0 hidden lg:block">
@@ -1018,6 +1019,21 @@ export default function AppPage() {
           </div>
         )}
 
+        {/* Auto-assigned Pool */}
+        {mounted && configOk && (
+          <div className="mb-6">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="text-sm font-black text-zinc-950">Your Pool</div>
+              <div className="rounded-xl border-2 border-black bg-amber-100 px-4 py-3 text-xs font-black text-zinc-950 shadow-[3px_3px_0_0_#000]">
+                Auto-assigned
+              </div>
+            </div>
+            <div className="rounded-xl border-2 border-black bg-white px-4 py-3 text-sm font-black text-zinc-950 shadow-[3px_3px_0_0_#000]">
+              Pool #{selectedPoolId.toString()}
+            </div>
+          </div>
+        )}
+
         {/* Prize Pool Hero */}
         <div className="we-card relative overflow-hidden rounded-3xl border-2 border-black bg-lime-200 shadow-[10px_10px_0_0_#000]">
           <div aria-hidden className="pointer-events-none absolute -bottom-10 -left-10 z-0 hidden md:block">
@@ -1060,9 +1076,9 @@ export default function AppPage() {
           />
           <StatCard
             icon="/icons/ticket.svg"
-            label="Your Tickets"
-            value={formatAmount(currentState?.deposits ?? 0n, selectedToken?.decimals ?? 18)}
-            subtext="1 ticket per token deposited"
+            label="Selected Pool"
+            value={`#${selectedPoolId.toString()}`}
+            subtext="Winning is pool-based, time-weighted"
             color="amber"
           />
           <StatCard
@@ -1198,7 +1214,7 @@ export default function AppPage() {
             <ul className="mt-4 space-y-3 text-sm font-semibold text-zinc-800">
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
-                Each token deposited = 1 lottery ticket
+                A winning pool is selected each draw (time-weighted by deposits)
               </li>
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
@@ -1206,7 +1222,7 @@ export default function AppPage() {
               </li>
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
-                Winners receive the entire yield prize pool
+                If your pool wins, yield prizes are split pro-rata within that pool
               </li>
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
@@ -1215,11 +1231,11 @@ export default function AppPage() {
             </ul>
           </div>
           <div className="we-card rounded-3xl border-2 border-black bg-white p-8 shadow-[6px_6px_0_0_#000]">
-            <h3 className="font-display mag-underline text-3xl text-zinc-950">Pool Stats ({selectedToken?.symbol ?? 'Token'})</h3>
+            <h3 className="font-display mag-underline text-3xl text-zinc-950">Pool Stats (Pool #{selectedPoolId.toString()} • {selectedToken?.symbol ?? 'Token'})</h3>
             <div className="mt-4 space-y-3 text-sm font-semibold">
               <div className="flex items-center justify-between">
-                <span className="text-zinc-800">Total Deposits</span>
-                <span className="font-black text-zinc-950">{formatAmount(selectedTokenTotalDeposits, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
+                <span className="text-zinc-800">Pool Deposits</span>
+                <span className="font-black text-zinc-950">{formatAmount(selectedPoolTokenDeposits, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-zinc-800">Prize Pool</span>
@@ -1228,10 +1244,10 @@ export default function AppPage() {
               <div className="flex items-center justify-between">
                 <span className="text-zinc-800">Your Share</span>
                 <span className="font-black text-zinc-950">
-                  {selectedTokenTotalDeposits > 0n
+                  {selectedPoolTokenDeposits > 0n
                     ? (() => {
                         const d = currentState?.deposits ?? 0n;
-                        const bps = (d * 10_000n) / selectedTokenTotalDeposits;
+                        const bps = (d * 10_000n) / selectedPoolTokenDeposits;
                         const pctInt = bps / 100n;
                         const pctFrac = bps % 100n;
                         return `${pctInt}.${pctFrac.toString().padStart(2, "0")}%`;
@@ -1254,7 +1270,7 @@ export default function AppPage() {
                 <div key={String(w.epochId)} className="flex items-center justify-between rounded-2xl border-2 border-black bg-zinc-50 px-4 py-3">
                   <div>
                     <div className="font-black text-zinc-950">Epoch #{w.epochId.toString()}</div>
-                    <div className="text-xs text-zinc-700">Pool #{w.winningPoolId.toString()} • {shortAddr(w.poolCreator)}</div>
+                    <div className="text-xs text-zinc-700">Pool #{w.winningPoolId.toString()}</div>
                   </div>
                   <div className="font-black text-green-700">${formatAmount(w.totalPrizeNormalized, 18)}</div>
                 </div>
@@ -1265,7 +1281,7 @@ export default function AppPage() {
 
         {/* Footer */}
         <footer className="mt-16 border-t-2 border-black pt-8 text-center text-xs font-semibold text-zinc-800">
-          Icons: Twemoji (CC-BY 4.0) • Brand art: provided EPS assets
+          Built during Mantle Global Hackathon ❤️
         </footer>
         </div>
       </main>

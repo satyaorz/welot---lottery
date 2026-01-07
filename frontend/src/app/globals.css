@@ -31,7 +31,8 @@ body {
     linear-gradient(to right, rgba(9, 9, 11, 0.06) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(9, 9, 11, 0.06) 1px, transparent 1px);
   background-size: 56px 56px;
-  background-position: center;
+  background-position: 50% 50%;
+  animation: grid-drift 18s linear infinite;
 }
 
 .bg-grid-tight {
@@ -39,9 +40,29 @@ body {
     linear-gradient(to right, rgba(9, 9, 11, 0.08) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(9, 9, 11, 0.08) 1px, transparent 1px);
   background-size: 28px 28px;
+  background-position: 50% 50%;
+  animation: grid-drift-tight 14s linear infinite;
 }
 
 /* Motion */
+@keyframes grid-drift {
+  from {
+    background-position: 50% 50%;
+  }
+  to {
+    background-position: calc(50% + 56px) calc(50% + 56px);
+  }
+}
+
+@keyframes grid-drift-tight {
+  from {
+    background-position: 50% 50%;
+  }
+  to {
+    background-position: calc(50% + 28px) calc(50% + 28px);
+  }
+}
+
 @keyframes floaty {
   0%,
   100% {
@@ -76,6 +97,11 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .we-floaty,
   .we-wiggle {
+    animation: none;
+  }
+
+  .bg-grid,
+  .bg-grid-tight {
     animation: none;
   }
 }
@@ -113,4 +139,67 @@ body {
   filter:
     invert(28%) sepia(70%) saturate(2900%) hue-rotate(252deg) brightness(110%) contrast(94%)
     drop-shadow(10px 10px 0 rgba(0, 0, 0, 0.24));
+}
+
+/* Button hover animation: subtle lift + shadow (respects reduced motion) */
+button,
+.btn {
+  transition: transform 160ms cubic-bezier(.2,.8,.2,1), box-shadow 160ms ease;
+  will-change: transform;
+}
+
+button:hover,
+.btn:hover {
+  transform: translateY(-3px) scale(1.02);
+  box-shadow: 0 12px 30px rgba(2, 6, 23, 0.08);
+}
+
+button:active,
+.btn:active {
+  transform: translateY(0) scale(0.995);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button,
+  .btn {
+    transition: none;
+    transform: none;
+    box-shadow: none;
+  }
+
+  .bg-grid,
+  .bg-grid-tight {
+    animation: none;
+  }
+
+  .sim-callout,
+  .sim-dot {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* Simulation callout */
+@keyframes sim-slide {
+  from { transform: translateY(-6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.sim-callout {
+  animation: sim-slide 360ms cubic-bezier(.2,.8,.2,1) both;
+}
+
+/* Small pulsing dot next to the simulation link */
+@keyframes sim-pulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.7; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.sim-dot {
+  width: 8px;
+  height: 8px;
+  background: #b46900; /* amber-700-ish */
+  border-radius: 9999px;
+  display: inline-block;
+  vertical-align: middle;
+  animation: sim-pulse 1.6s ease-in-out infinite;
 }

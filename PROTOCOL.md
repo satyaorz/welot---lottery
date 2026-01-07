@@ -22,6 +22,19 @@ Draws run on a cadence (weekly in this repo). A draw selects a winning **pool**,
 
 Each supported token is configured with an ERC-4626 vault whose `asset()` must equal the token. `WelotVault` deposits assets into these vaults and later withdraws assets to satisfy withdrawals/prize claims.
 
+#### Lendle Integration (USDC, USDT)
+
+For USDC and USDT on Mantle, WeLot uses **Lendle** (Mantle's native Aave V3 fork):
+
+- **LendleYieldVault**: An ERC4626 adapter that deposits assets into Lendle's lending pools
+- **Yield mechanism**: Depositors receive aTokens (interest-bearing tokens); yield accrues via increasing aToken balance
+- **Withdrawal**: Instant withdrawals subject to available liquidity in the Lendle pool
+- **APY**: Variable rates based on pool utilization (USDC ~12%, USDT ~5% as of Jan 2025)
+
+See [LENDLE_MECHANICS.md](./contracts/LENDLE_MECHANICS.md) for implementation details.
+
+All yield sources must be ERC4626-compliant to integrate with WelotVault.
+
 ### Randomness (Pyth Entropy)
 
 `WelotVault` uses Entropy V2:
@@ -32,11 +45,17 @@ Each supported token is configured with an ERC-4626 vault whose `asset()` must e
 
 ## Pools (the “lottery tickets”)
 
-Users deposit into **pools**. Pool `1` is created in the constructor as the default.
+Users deposit into **pools**, but in the current implementation pools are **fixed and auto-assigned**:
 
-- Create a new pool: `createPool()`
-- Deposit into pool 1: `deposit(token, amount)`
-- Deposit into a specific pool: `depositTo(token, amount, poolId, recipient)`
+- A fixed set of pools is created at deployment (10 in the deploy scripts).
+- Each user is deterministically assigned to one pool based on their address.
+
+There is no public pool-creation method in the current contract; pools are created once at deployment.
+
+Practical implications:
+
+- `deposit(token, amount)` deposits into **your assigned pool**.
+- `depositTo(token, amount, poolId, recipient)` is only valid when `poolId` equals the recipient’s assigned pool.
 
 ### Winner weighting: time-weighted deposits
 
@@ -63,7 +82,7 @@ If `drawInterval` is something else (for local demos), end times are interval-al
 An epoch progresses through:
 
 1. **Open** — accepts deposits/withdrawals
-2. **Closed** — epoch ended; deposits are still allowed by the contract, but the draw lifecycle starts here
+2. **Closed** — epoch ended; deposits/withdrawals are still allowed by the contract, but the draw lifecycle starts here
 3. **RandomnessRequested** — waiting for Entropy callback
 4. **RandomnessReady** — random number received; ready to finalize
 
@@ -98,15 +117,16 @@ When a winning pool is selected, `finalizeDraw()` loops over supported tokens an
 
 This means:
 
-- Prizes are claimable per token and per pool.
+- A draw selects a **winning pool** (not a single address).
+- Prizes are claimable per token and per pool, pro-rata among depositors of that token inside the winning pool.
 - If the winning pool has **zero** deposits of a token, that token’s prize pool is not allocated in that draw (it remains as surplus for future draws).
 
 ### Claiming
 
 Users claim via:
 
-- `claimPrize(token)` (default pool 1)
-- `claimPrizeFrom(token, poolId)` (specific pool)
+- `claimPrize(token)` (from your assigned pool)
+- `claimPrizeFrom(token, poolId)` (specific pool, must match assigned pool)
 
 Claims withdraw assets from the token’s yield vault.
 
@@ -125,10 +145,30 @@ The contract uses `performData` to encode an action:
 
 Optionally, the owner can set an `automationForwarder` via `setAutomationForwarder(address)`. If set, only that address may call `performUpkeep`.
 
+Entropy fee note: when the epoch is `Closed`, `checkUpkeep` returns `upkeepNeeded=false` if the vault's native balance is below `entropy.getFeeV2()`. This prevents revert-loops; operationally, your keeper/ops should top up the vault balance and retry.
+
+Current Mantle Sepolia deployment (present):
+
+```dotenv
+NEXT_PUBLIC_CHAIN_ID=5003
+NEXT_PUBLIC_RPC_URL=
+
+NEXT_PUBLIC_WELOT_VAULT=0x8cdEcB86577BA93709C05B32474667a1C1360988
+NEXT_PUBLIC_ENTROPY=0x98046Bd286715D3B0BC227Dd7a956b83D8978603
+NEXT_PUBLIC_FAUCET=0xfC02B04FacbFD3D1b9E1C037A9d867f055BDA9CE
+
+NEXT_PUBLIC_USDC=0xCEc970693C0FdEA3BE7a9b2BF68bF4651f27e25A
+NEXT_PUBLIC_SUSDC=0x860967abD2319Ed238C5aEf085743afCb4227036
+NEXT_PUBLIC_USDT=0xe02199dE8111645135873fA38157EA7B5D7423eC
+NEXT_PUBLIC_SUSDT=0x7C2380BF55D4E23707a7f0708bdAD8faa8d1D254
+```
+
 ## Key read methods (for UIs)
 
 - `getSupportedTokens()`
+- `assignedPoolId(user)` → returns the pool ID for a user
 - `getUserPosition(token, poolId, user)` → `(deposited, claimable)`
+- `poolTokenDeposits(token, poolId)` → deposits for a token in a pool
 - `currentPrizePool(token)`
 - `getTimeUntilDraw()`
 - `epochStatus()` / `getCurrentEpoch()` / `getEpoch(epochId)`

@@ -10,14 +10,14 @@ Deployed via `contracts/script/DeployMantle.s.sol` (chainId `5003`). For testnet
 - `WelotVault`
   - **Draw interval**: `7 days`
   - **Schedule**: **Friday 12:00 UTC** ("Friday noon")
-  - **Max pools**: `64`
+  - **Max pools**: `10`
 - Entropy provider
   - Default: real Pyth Entropy (as configured in `contracts/script/DeployMantle.s.sol`)
   - Optional: `MockEntropyV2` if you deploy with `DEPLOY_MOCK_ENTROPY=true`
-- `MockERC20` tokens: `USDe` (18), `USDC` (6), `mETH` (18)
-- `MockERC4626` yield vaults: `sUSDe`, `sUSDC`, `smETH`
-  - Auto-accrues yield over time (see “Auto-yield mock” below)
-  - **Higher yield rate** configured in the script (~10 tokens/minute) so prize pools move quickly in demos
+- `MockERC20` tokens: `USDC` (6 decimals), `USDT` (6 decimals)
+- `LendleYieldVault` ERC-4626 vaults: `sUSDC`, `sUSDT`
+  - On testnet these plug into `MockLendlePool` + `MockAToken` to simulate Aave-style yield
+  - **Higher yield rate** configured in the script (~12% APY USDC, ~5% APY USDT) for quick testing
 - `MockFaucet`
   - Lets wallets mint test tokens once per token (cooldown=0, but still “one-time claim per token” logic)
 
@@ -33,9 +33,8 @@ The frontend reads these env vars (via `NEXT_PUBLIC_*`):
 - `NEXT_PUBLIC_ENTROPY`
 - `NEXT_PUBLIC_FAUCET`
 - Token + vault addresses:
-  - `NEXT_PUBLIC_USDE`, `NEXT_PUBLIC_SUSDE`
   - `NEXT_PUBLIC_USDC`, `NEXT_PUBLIC_SUSDC`
-  - `NEXT_PUBLIC_METH`, `NEXT_PUBLIC_SMETH`
+  - `NEXT_PUBLIC_USDT`, `NEXT_PUBLIC_SUSDT`
 
 After changing `frontend/.env.local`, restart the dev server so Next inlines the new values.
 
@@ -72,7 +71,7 @@ Recommended production checklist:
 - Set `automationForwarder` on the vault to your keeper wallet (recommended) using `setAutomationForwarder(<keeper_wallet>)`. This prevents arbitrary callers from running upkeep.
 - Use the official Pyth Entropy contract address for your target chain as the `IEntropyV2` provider; set that address in the deploy script for mainnet.
 - Ensure the vault is funded with enough native currency to pay any entropy fees (`entropy.getFeeV2()`). Top up the contract as part of deployment or via a guardian script.
-- Replace mock ERC4626 vaults with real yield sources that implement `IERC4626` so `totalAssets()` grows naturally.
+- Replace mock ERC4626 vaults with real yield sources (LendleYieldVault for USDC/USDT) that implement `IERC4626` so `totalAssets()` grows naturally.
 - Remove any faucets and mint privileges from production builds — tokens on mainnet are real and must not be mintable.
 
 Example production steps (high level):
@@ -101,54 +100,113 @@ export POLL_INTERVAL_MS=30000
 npm run keeper
 ```
 
+Note: the contract intentionally returns `upkeepNeeded=false` when the epoch is `Closed` but the vault is underfunded for the Entropy fee. A keeper must top up the vault balance (native token) and then retry.
+
+# Mantle Sepolia Testing Notes (Welot)
+
+This document describes the testnet deployment and operational notes for Welot on Mantle Sepolia. The test deployment uses mock tokens and yield sources to emulate production behavior while keeping tests fast and deterministic.
+
+## Deployed components (Mantle Sepolia)
+
+Deployed using `contracts/script/DeployMantle.s.sol` (chainId 5003). The testnet deployment includes:
+
+- `WelotVault` — weekly draw cadence (7 days), scheduled Friday 12:00 UTC, up to 10 pools.
+- Entropy provider — by default the real Pyth Entropy contract; optionally `MockEntropyV2` when `DEPLOY_MOCK_ENTROPY=true`.
+- Mock tokens: `USDC`, `USDT` (6 decimals).
+- ERC-4626 yield mocks: `sUSDC`, `sUSDT` (backed by `MockLendlePool` + `MockAToken` for simulated yield).
+- `MockFaucet` — one-time faucet per token for convenient testing.
+
+The deploy script prints `NEXT_PUBLIC_*` values for the frontend; these values are included below.
+
+## Frontend configuration
+
+The frontend reads public runtime variables via `NEXT_PUBLIC_*`. After updating `frontend/.env.local` restart the dev server so Next inlines the values.
+
+Required variables:
+
+- `NEXT_PUBLIC_RPC_URL`
+- `NEXT_PUBLIC_CHAIN_ID=5003`
+- `NEXT_PUBLIC_WELOT_VAULT`
+- `NEXT_PUBLIC_ENTROPY`
+- `NEXT_PUBLIC_FAUCET`
+- `NEXT_PUBLIC_USDC`, `NEXT_PUBLIC_SUSDC`
+- `NEXT_PUBLIC_USDT`, `NEXT_PUBLIC_SUSDT`
+
+Current Mantle Sepolia deployment values (present):
+
+```dotenv
+NEXT_PUBLIC_CHAIN_ID=5003
+NEXT_PUBLIC_RPC_URL=
+
+NEXT_PUBLIC_WELOT_VAULT=0x8cdEcB86577BA93709C05B32474667a1C1360988
+NEXT_PUBLIC_ENTROPY=0x98046Bd286715D3B0BC227Dd7a956b83D8978603
+NEXT_PUBLIC_FAUCET=0xfC02B04FacbFD3D1b9E1C037A9d867f055BDA9CE
+
+NEXT_PUBLIC_USDC=0xCEc970693C0FdEA3BE7a9b2BF68bF4651f27e25A
+NEXT_PUBLIC_SUSDC=0x860967abD2319Ed238C5aEf085743afCb4227036
+NEXT_PUBLIC_USDT=0xe02199dE8111645135873fA38157EA7B5D7423eC
+NEXT_PUBLIC_SUSDT=0x7C2380BF55D4E23707a7f0708bdAD8faa8d1D254
+```
+
+## Draw lifecycle (contract behavior)
+
+The `WelotVault` draw lifecycle follows the same sequence for test and production:
+
+1. `closeEpoch()` — callable once `block.timestamp >= epoch.end`.
+2. `requestRandomness()` — requests randomness from the configured entropy provider.
+3. `entropyCallback(...)` — provider calls back with randomness.
+4. `finalizeDraw()` — selects the winning pool (time-weighted by deposits) and distributes rewards.
+
+Randomness options on testnet:
+
+- Real Pyth Entropy (default): call `requestRandomness()` and wait for the provider callback before `finalizeDraw()`.
+- Mock entropy (opt-in): deploy with `DEPLOY_MOCK_ENTROPY=true` and fulfill deterministically with `MockEntropyV2.fulfill(sequence, randomness)`.
+
+## Automation and keeper guidance
+
+This repository includes a minimal keeper implementation at `frontend/scripts/keeper.mjs`. The keeper polls `checkUpkeep` and calls `performUpkeep(performData)` when required. The keeper supports an `ONCE=1` mode to run a single tick.
+
+Operational notes:
+
+- The vault must hold sufficient native balance to pay `entropy.getFeeV2()`. When the epoch is `Closed` but the vault balance is insufficient, `checkUpkeep` intentionally returns `upkeepNeeded=false` to avoid revert loops. The keeper implementation can top up the vault balance and retry.
+- If `automationForwarder` is configured on the vault, only the forwarder address is permitted to call `performUpkeep`.
+
+Keeper example environment:
+
+```bash
+cd frontend
+
+# required
+export RPC_URL=
+export CHAIN_ID=5003
+export WELOT_VAULT=0x8cdEcB86577BA93709C05B32474667a1C1360988
+export PRIVATE_KEY=<keeper_private_key>
+
+# optional
+export POLL_INTERVAL_MS=30000
+
+npm run keeper
+```
+
 To run a single tick and exit:
 
 ```bash
 ONCE=1 npm run keeper
 ```
 
-Security notes:
+Security reminders:
 
-- Use a secure multisig for `owner` and deployment actions.
-- Monitor gas and entropy fee costs and add alerting for low balances.
-- Audit the integration points (entropy provider, automation operator, yield sources) for correctness and permissions.
+- Use a secure multisig for owner and deployment actions.
+- Monitor gas and entropy fee costs and alert for low balances.
+- Audit integrations (entropy provider, automation operator, yield sources) before production.
 
-## Auto-yield mock (how prize pool grows on testnet)
+## Auto-yield mock behavior
 
-`MockERC4626` is modified to **auto-accrue yield over time**.
+The test ERC-4626 mocks auto-accrue yield over time. `totalAssets()` reports the current balance plus pending yield, which makes `WelotVault.currentPrizePool(token)` grow over time without manual donations.
 
-- It exposes `yieldRatePerSecond` and tracks `lastYieldTimestamp`
-- `totalAssets()` returns `currentBalance + pendingYield`
-- On deposits/withdrawals, pending yield is “realized” by minting underlying tokens into the vault
+## Commands (deploy + run)
 
-Result: the `WelotVault.currentPrizePool(token)` becomes non-zero over time without needing a user to donate tokens.
-
-## Production: what changes (no mocks)
-
-For production, replace the mocks with real integrations:
-
-- **Entropy/VRF**
-  - Use the real Pyth Entropy contract address for the target chain
-  - Keep ETH/MNT funded for entropy fees
-  - Randomness arrives asynchronously via the provider callback
-
-- **Tokens + Yield sources**
-  - Use real ERC20 tokens (USDe/USDC/etc.) and real yield sources
-  - The yield source should be an ERC4626 vault (or a wrapper vault) so `totalAssets()` grows naturally
-
-- **Automation**
-  - Use Chainlink Automation (or an off-chain keeper) to:
-    - call `closeEpoch()` once time is up
-    - call `requestRandomness()`
-    - call `finalizeDraw()` once randomness is ready
-
-- **Timing**
-  - Testnet and production both use a weekly cadence in this repo.
-  - If you want a faster local demo cadence, deploy to Anvil or modify the deploy script.
-
-## Commands used
-
-Deploy to Mantle Sepolia (reads `contracts/.env`):
+Deploy to Mantle Sepolia (the deploy scripts read `contracts/.env`):
 
 ```bash
 cd contracts
@@ -156,28 +214,6 @@ set -a
 source .env
 set +a
 forge script script/DeployMantle.s.sol:DeployMantleScript --rpc-url "$MANTLE_SEPOLIA_RPC_URL" --private-key "$PRIVATE_KEY" --broadcast
-
-# Optional: deploy with an on-chain mock entropy (deterministic draw testing)
-# DEPLOY_MOCK_ENTROPY=true forge script ...
-
-# Optional: override entropy address (if Pyth address changes)
-# ENTROPY_ADDRESS=0x... forge script ...
-```
-
-Run a draw end-to-end using the helper script (only works with on-chain `MockEntropyV2`):
-
-```bash
-cd contracts
-set -a
-source .env
-set +a
-
-# Set these from your deploy output
-export WELOT_VAULT=0x...
-export ENTROPY=0x...
-
-# Defaults: MOCK_ENTROPY=true and RANDOM_WORD=1
-forge script script/RunDraw.s.sol:RunDrawScript --rpc-url "$MANTLE_SEPOLIA_RPC_URL" --private-key "$PRIVATE_KEY" --broadcast
 ```
 
 Run the frontend:

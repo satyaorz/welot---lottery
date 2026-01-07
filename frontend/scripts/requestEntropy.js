@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/no-require-imports */
 const { createPublicClient, createWalletClient, http, parseAbi } = require('viem');
 const { privateKeyToAccount } = require('viem/accounts');
 

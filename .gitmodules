@@ -5,5 +5,4 @@
 	path = contracts/lib/openzeppelin-contracts
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts.git
 [submodule "contracts/lib/chainlink-brownie-contracts"]
-	path = contracts/lib/chainlink-brownie-contracts
-	url = https://github.com/smartcontractkit/chainlink-brownie-contracts.git
+	# chainlink submodule removed

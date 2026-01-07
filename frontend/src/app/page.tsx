@@ -20,7 +20,7 @@ export default function Home() {
         <nav className="flex items-center gap-3">
           <Link
             href="/app"
-            className="rounded-2xl border-2 border-black bg-zinc-950 px-4 py-2 text-sm font-black text-zinc-50 shadow-[4px_4px_0_0_#000]"
+            className="btn rounded-2xl border-2 border-black bg-zinc-950 px-4 py-2 text-sm font-black text-zinc-50 shadow-[4px_4px_0_0_#000]"
           >
             Enter App
           </Link>
@@ -108,13 +108,13 @@ export default function Home() {
             <div className="mt-6 flex flex-col gap-3 sm:flex-row">
               <Link
                 href="/app"
-                className="inline-flex items-center justify-center rounded-2xl border-2 border-black bg-lime-200 px-5 py-3 text-base font-black shadow-[4px_4px_0_0_#000]"
+                className="btn inline-flex items-center justify-center rounded-2xl border-2 border-black bg-lime-200 px-5 py-3 text-base font-black shadow-[4px_4px_0_0_#000]"
               >
                 Start
               </Link>
               <a
                 href="#how-it-works"
-                className="inline-flex items-center justify-center rounded-2xl border-2 border-black bg-white px-5 py-3 text-base font-black shadow-[4px_4px_0_0_#000]"
+                className="btn inline-flex items-center justify-center rounded-2xl border-2 border-black bg-white px-5 py-3 text-base font-black shadow-[4px_4px_0_0_#000]"
               >
                 How it works
               </a>
@@ -136,7 +136,7 @@ export default function Home() {
               <div className="text-sm font-bold text-zinc-300">you can</div>
               <ul className="mt-3 space-y-2 text-sm font-semibold">
                 <li className="flex items-center justify-between">
-                  <span>deposit USDe</span>
+                  <span>deposit stablecoins</span>
                   <span className="rounded-xl border border-zinc-700 px-2 py-1 text-xs">tickets</span>
                 </li>
                 <li className="flex items-center justify-between">

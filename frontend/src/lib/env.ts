@@ -18,14 +18,11 @@ const NEXT_PUBLIC_ENV: Record<string, string | undefined> = {
   NEXT_PUBLIC_WELOT_VAULT: process.env.NEXT_PUBLIC_WELOT_VAULT,
   NEXT_PUBLIC_ENTROPY: process.env.NEXT_PUBLIC_ENTROPY,
   NEXT_PUBLIC_FAUCET: process.env.NEXT_PUBLIC_FAUCET,
-  NEXT_PUBLIC_USDE_FAUCET: process.env.NEXT_PUBLIC_USDE_FAUCET,
 
-  NEXT_PUBLIC_USDE: process.env.NEXT_PUBLIC_USDE,
-  NEXT_PUBLIC_SUSDE: process.env.NEXT_PUBLIC_SUSDE,
   NEXT_PUBLIC_USDC: process.env.NEXT_PUBLIC_USDC,
   NEXT_PUBLIC_SUSDC: process.env.NEXT_PUBLIC_SUSDC,
-  NEXT_PUBLIC_METH: process.env.NEXT_PUBLIC_METH,
-  NEXT_PUBLIC_SMETH: process.env.NEXT_PUBLIC_SMETH,
+  NEXT_PUBLIC_USDT: process.env.NEXT_PUBLIC_USDT,
+  NEXT_PUBLIC_SUSDT: process.env.NEXT_PUBLIC_SUSDT,
 };
 
 export function optionalEnv(name: string): string | undefined {

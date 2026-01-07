@@ -21,7 +21,7 @@ const fontPixel = Press_Start_2P({
 });
 
 export const metadata: Metadata = {
-  title: "welot.fun",
+  title: "welot-lottery",
   description: "No-loss savings lottery UI.",
 };
 

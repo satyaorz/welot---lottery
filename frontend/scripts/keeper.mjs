@@ -2,6 +2,7 @@ import {
   createPublicClient,
   createWalletClient,
   defineChain,
+  decodeAbiParameters,
   http,
   parseAbi,
 } from "viem";
@@ -39,7 +40,11 @@ const abi = parseAbi([
   "function performUpkeep(bytes performData)",
   "function automationForwarder() view returns (address)",
   "function currentEpochId() view returns (uint256)",
+  "function epochStatus() view returns (uint8)",
+  "function entropy() view returns (address)",
 ]);
+
+const entropyAbi = parseAbi(["function getFeeV2() view returns (uint256)"]);
 
 const account = privateKeyToAccount(PRIVATE_KEY);
 
@@ -56,6 +61,32 @@ const walletClient = createWalletClient({
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function topUpVaultIfNeeded() {
+  const entropyAddr = await publicClient.readContract({
+    address: WELOT_VAULT,
+    abi,
+    functionName: "entropy",
+  });
+
+  const fee = await publicClient.readContract({
+    address: entropyAddr,
+    abi: entropyAbi,
+    functionName: "getFeeV2",
+  });
+
+  const bal = await publicClient.getBalance({ address: WELOT_VAULT });
+  if (bal >= fee) return false;
+
+  const topUp = fee - bal;
+  console.log(`[keeper] topping up vault balance by ${topUp.toString()}`);
+  const tx = await walletClient.sendTransaction({
+    to: WELOT_VAULT,
+    value: topUp,
+  });
+  await publicClient.waitForTransactionReceipt({ hash: tx });
+  return true;
+}
+
 async function tick() {
   for (let step = 0; step < MAX_STEPS_PER_RUN; step++) {
     const epochId = await publicClient.readContract({
@@ -64,11 +95,31 @@ async function tick() {
       functionName: "currentEpochId",
     });
 
+    const status = await publicClient.readContract({
+      address: WELOT_VAULT,
+      abi,
+      functionName: "epochStatus",
+    });
+
     const forwarder = await publicClient.readContract({
       address: WELOT_VAULT,
       abi,
       functionName: "automationForwarder",
     });
+
+    // If `automationForwarder` is set, the contract will revert unless
+    // `msg.sender` matches it. Warn early to avoid wasting gas.
+    if (forwarder && forwarder !== "0x0000000000000000000000000000000000000000") {
+      const fwd = String(forwarder).toLowerCase();
+      const me = String(account.address).toLowerCase();
+      if (fwd !== me) {
+        console.error(
+          `[keeper] ERROR: automationForwarder=${forwarder} blocks keeper EOA=${account.address}. ` +
+            `Either unset it or set it to the keeper address.`
+        );
+        return;
+      }
+    }
 
     const [upkeepNeeded, performData] = await publicClient.readContract({
       address: WELOT_VAULT,
@@ -79,10 +130,35 @@ async function tick() {
 
     console.log(
       `[keeper] step=${step + 1}/${MAX_STEPS_PER_RUN} epoch=${epochId.toString()} ` +
-        `upkeepNeeded=${upkeepNeeded} automationForwarder=${forwarder} performData=${performData}`
+        `status=${status.toString()} upkeepNeeded=${upkeepNeeded} automationForwarder=${forwarder} performData=${performData}`
     );
 
-    if (!upkeepNeeded) return;
+    // Contract intentionally returns upkeepNeeded=false when the epoch is Closed
+    // but the vault isn't funded enough to pay Entropy's fee. In that case we can
+    // top up proactively, then try again.
+    if (!upkeepNeeded) {
+      if (Number(status) === 1) {
+        try {
+          const didTopUp = await topUpVaultIfNeeded();
+          if (didTopUp) continue;
+        } catch (err) {
+          console.error("[keeper] top-up check failed:", err);
+        }
+      }
+      return;
+    }
+
+    // If the next action is "request randomness" (action=2), ensure the vault
+    // has enough native balance to pay Entropy's fee. The contract checks its
+    // own balance (not msg.value), so we top it up proactively.
+    try {
+      const [action] = decodeAbiParameters([{ type: "uint8" }], performData);
+      if (Number(action) === 2) {
+        await topUpVaultIfNeeded();
+      }
+    } catch {
+      // Best-effort; if decoding fails, proceed.
+    }
 
     const txHash = await walletClient.writeContract({
       address: WELOT_VAULT,

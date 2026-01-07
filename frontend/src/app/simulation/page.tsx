@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState, useCallback, useRef } from "react";
+import type { Abi, Address } from "viem";
 import { getPublicClient } from "../../lib/clients";
 import { welotVaultAbi } from "../../lib/abis";
 import { optionalEnv } from "../../lib/env";
@@ -57,9 +58,8 @@ const RANDOM_NAMES = [
 const AVATARS = ["🦊", "🐼", "🦁", "🐯", "🐸", "🦉", "🐙", "🦋", "🐳", "🦄", "🐲", "🦚"];
 
 const INITIAL_TOKENS: SimToken[] = [
-  { symbol: "USDe", name: "Ethena USD", icon: "💵", color: "bg-emerald-100", totalDeposits: 0, prizePool: 0, apy: 15 },
-  { symbol: "USDC", name: "USD Coin", icon: "💲", color: "bg-blue-100", totalDeposits: 0, prizePool: 0, apy: 8 },
-  { symbol: "mETH", name: "Mantle ETH", icon: "💎", color: "bg-purple-100", totalDeposits: 0, prizePool: 0, apy: 5 },
+  { symbol: "USDC", name: "USD Coin", icon: "💲", color: "bg-blue-100", totalDeposits: 0, prizePool: 0, apy: 12 },
+  { symbol: "USDT", name: "Tether USD", icon: "💵", color: "bg-green-100", totalDeposits: 0, prizePool: 0, apy: 5 },
 ];
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -349,9 +349,9 @@ export default function SimulationPage() {
   // Epoch starts empty on the server; initialize on client mount to avoid mismatches
   const [epoch, setEpoch] = useState<SimEpoch | null>(null);
   const [epochHistory, setEpochHistory] = useState<SimEpoch[]>([]);
-  const [leaderboard, setLeaderboard] = useState<{ poolId: number; creator: string; totalDeposits: bigint }[]>([]);
+  const [leaderboard, setLeaderboard] = useState<{ poolId: number; totalDeposits: bigint }[]>([]);
   const [pastWinnersOnChain, setPastWinnersOnChain] = useState<
-    { epochId: number; winningPoolId: number; poolCreator: string; totalPrizeNormalized: bigint; timestamp: number }[]
+    { epochId: number; winningPoolId: number; totalPrizeNormalized: bigint; timestamp: number }[]
   >([]);
 
   // Logs start empty (will be populated on client mount)
@@ -608,19 +608,43 @@ export default function SimulationPage() {
       try {
         const vault = optionalEnv("NEXT_PUBLIC_WELOT_VAULT") || (process.env.NEXT_PUBLIC_WELOT_VAULT as string);
         if (!vault) return;
+        const vaultAddress = vault as Address;
         const client = getPublicClient();
+        const abi = welotVaultAbi as Abi;
+
+        const toNumber = (v: unknown): number => {
+          if (typeof v === "bigint") return Number(v);
+          if (typeof v === "number") return v;
+          if (typeof v === "string") return Number(v);
+          return Number(v ?? 0);
+        };
 
         // Leaderboard: read poolIdsLength and each pool
-        const lenBn = await client.readContract({ address: vault as any, abi: welotVaultAbi as any, functionName: "poolIdsLength" }) as unknown as bigint;
+        const lenBn = (await client.readContract({
+          address: vaultAddress,
+          abi,
+          functionName: "poolIdsLength",
+        })) as unknown as bigint;
         const len = Number(lenBn || 0);
-        const pools: { poolId: number; creator: string; totalDeposits: bigint }[] = [];
+        const pools: { poolId: number; totalDeposits: bigint }[] = [];
         for (let i = 0; i < len; i++) {
           try {
-            const pidBn = await client.readContract({ address: vault as any, abi: welotVaultAbi as any, functionName: "poolIds", args: [BigInt(i)] }) as unknown as bigint;
+            const pidBn = (await client.readContract({
+              address: vaultAddress,
+              abi,
+              functionName: "poolIds",
+              args: [BigInt(i)],
+            })) as unknown as bigint;
             const pid = Number(pidBn);
-            const p = await client.readContract({ address: vault as any, abi: welotVaultAbi as any, functionName: "pools", args: [BigInt(pid)] }) as any;
-            const totalDeposits = (p?.totalDeposits ?? 0n) as bigint;
-            pools.push({ poolId: pid, creator: p?.creator || "", totalDeposits });
+            const pUnknown = await client.readContract({
+              address: vaultAddress,
+              abi,
+              functionName: "pools",
+              args: [BigInt(pid)],
+            });
+            const p = (pUnknown ?? {}) as Record<string, unknown>;
+            const totalDeposits = typeof p.totalDeposits === "bigint" ? p.totalDeposits : 0n;
+            pools.push({ poolId: pid, totalDeposits });
           } catch (e) {
             // ignore per-pool errors
           }
@@ -630,22 +654,30 @@ export default function SimulationPage() {
 
         // Past winners: use the on-chain ring buffer
         try {
-          const rows = (await client.readContract({
-            address: vault as any,
-            abi: welotVaultAbi as any,
+          const rowsUnknown = await client.readContract({
+            address: vaultAddress,
+            abi,
             functionName: "getPastWinners",
             args: [10n],
-          })) as any[];
+          });
 
-          const winners = (rows || [])
-            .filter((r) => r && Number(r.winningPoolId || 0) > 0)
-            .map((r) => ({
-              epochId: Number(r.epochId || 0),
-              winningPoolId: Number(r.winningPoolId || 0),
-              poolCreator: String(r.poolCreator || ""),
-              totalPrizeNormalized: (r.totalPrizeNormalized ?? 0n) as bigint,
-              timestamp: r.timestamp ? Number(r.timestamp) : 0,
-            }));
+          const rows = Array.isArray(rowsUnknown) ? (rowsUnknown as unknown[]) : [];
+
+          const winners = rows
+            .map((r) => (r && typeof r === "object" ? (r as Record<string, unknown>) : null))
+            .filter((r): r is Record<string, unknown> => Boolean(r) && toNumber(r?.winningPoolId) > 0)
+            .map((r) => {
+              const totalPrizeNormalized = typeof r.totalPrizeNormalized === "bigint" ? r.totalPrizeNormalized : 0n;
+              const ts = r.timestamp;
+              const timestamp = typeof ts === "bigint" ? Number(ts) : typeof ts === "number" ? ts : 0;
+
+              return {
+                epochId: toNumber(r.epochId),
+                winningPoolId: toNumber(r.winningPoolId),
+                totalPrizeNormalized,
+                timestamp,
+              };
+            });
 
           if (mounted) setPastWinnersOnChain(winners);
         } catch {
@@ -943,7 +975,6 @@ export default function SimulationPage() {
                     <div key={p.poolId} className="flex justify-between items-center">
                       <div>
                         <div className="font-bold">Pool #{p.poolId}</div>
-                        <div className="text-zinc-600 text-xs">by {p.creator}</div>
                       </div>
                       <div className="text-right">
                         <div className="font-black text-sm">${formatNumber(Number((p.totalDeposits ?? 0n) / 10n ** 18n))}</div>
@@ -967,7 +998,6 @@ export default function SimulationPage() {
                         <div className="text-green-600 font-black">${formatNumber(Number((w.totalPrizeNormalized ?? 0n) / 10n ** 18n))}</div>
                       </div>
                       <div className="text-zinc-600 text-xs">Winning Pool #{w.winningPoolId}</div>
-                      {w.poolCreator && <div className="text-zinc-600 text-xs">by {w.poolCreator}</div>}
                     </div>
                   ))}
                 </div>
