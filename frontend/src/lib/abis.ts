@@ -195,6 +195,21 @@ export const welotVaultAbi = [
   },
   {
     type: "function",
+    name: "pools",
+    stateMutability: "view",
+    inputs: [{ name: "poolId", type: "uint256" }],
+    outputs: [
+      { name: "exists", type: "bool" },
+      { name: "creator", type: "address" },
+      { name: "totalDeposits", type: "uint256" },
+      { name: "rewardIndex", type: "uint256" },
+      { name: "cumulative", type: "uint256" },
+      { name: "lastTimestamp", type: "uint64" },
+      { name: "lastBalance", type: "uint256" },
+    ],
+  },
+  {
+    type: "function",
     name: "getUserPosition",
     stateMutability: "view",
     inputs: [
@@ -206,6 +221,37 @@ export const welotVaultAbi = [
       { name: "deposited", type: "uint256" },
       { name: "claimable", type: "uint256" },
     ],
+  },
+
+  // Past winners (ring buffer)
+  {
+    type: "function",
+    name: "getPastWinners",
+    stateMutability: "view",
+    inputs: [{ name: "limit", type: "uint256" }],
+    outputs: [
+      {
+        name: "",
+        type: "tuple[]",
+        components: [
+          { name: "epochId", type: "uint256" },
+          { name: "timestamp", type: "uint64" },
+          { name: "winningPoolId", type: "uint256" },
+          { name: "poolCreator", type: "address" },
+          { name: "totalPrizeNormalized", type: "uint256" },
+        ],
+      },
+    ],
+  },
+  {
+    type: "function",
+    name: "epochTokenPrize",
+    stateMutability: "view",
+    inputs: [
+      { name: "epochId", type: "uint256" },
+      { name: "token", type: "address" },
+    ],
+    outputs: [{ name: "prize", type: "uint256" }],
   },
 
   // ═══════════════════════════════════════════════════════════════════
@@ -270,6 +316,25 @@ export const welotVaultAbi = [
     inputs: [
       { name: "epochId", type: "uint256", indexed: true },
       { name: "winningPoolId", type: "uint256", indexed: true },
+      { name: "prize", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "PastWinnerRecorded",
+    inputs: [
+      { name: "epochId", type: "uint256", indexed: true },
+      { name: "winningPoolId", type: "uint256", indexed: true },
+      { name: "poolCreator", type: "address", indexed: true },
+      { name: "totalPrizeNormalized", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "TokenPrizeRecorded",
+    inputs: [
+      { name: "epochId", type: "uint256", indexed: true },
+      { name: "token", type: "address", indexed: true },
       { name: "prize", type: "uint256", indexed: false },
     ],
   },

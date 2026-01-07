@@ -280,6 +280,10 @@ export default function AppPage() {
   // Global state
   const [totalDeposits, setTotalDeposits] = useState(0n);
   const [prizePool, setPrizePool] = useState(0n);
+  const [selectedTokenTotalDeposits, setSelectedTokenTotalDeposits] = useState(0n);
+  const [pastWinners, setPastWinners] = useState<
+    { epochId: bigint; winningPoolId: bigint; poolCreator: Address; totalPrizeNormalized: bigint; timestamp: bigint }[]
+  >([]);
   const [timeUntilDraw, setTimeUntilDraw] = useState(0);
   const [epochStatus, setEpochStatus] = useState(0);
   const [epochEndTime, setEpochEndTime] = useState<number>(0);
@@ -296,6 +300,8 @@ export default function AppPage() {
   const faucetOk = Boolean(CONFIG.faucetAddress);
   const chain = getChain();
   const isLocalhost = chain.id === 31337;
+  const isMantleSepolia = chain.id === 5003;
+  const faucetUiEnabled = faucetOk && (isLocalhost || isMantleSepolia);
 
   // Current token state
   const currentState = selectedToken ? tokenStates[selectedToken.address] : null;
@@ -451,6 +457,38 @@ export default function AppPage() {
       setTimeUntilDraw(Math.max(0, Number(timeLeft)));
       setEpochStatus(Number(epoch[2]));
 
+      // Past winners (newest first)
+      try {
+        const rows = await publicClient.readContract({
+          address: CONFIG.vaultAddress!,
+          abi: welotVaultAbi,
+          functionName: "getPastWinners",
+          args: [10n],
+        });
+        setPastWinners((rows as any[]) ?? []);
+      } catch {
+        // Older deployments may not have this method.
+        setPastWinners([]);
+      }
+
+      // Selected token total deposits
+      if (selectedToken) {
+        try {
+          const cfg = await publicClient.readContract({
+            address: CONFIG.vaultAddress!,
+            abi: welotVaultAbi,
+            functionName: "tokenConfigs",
+            args: [selectedToken.address],
+          });
+          // cfg = [enabled, yieldVault, decimals, totalDeposits, totalUnclaimedPrizes]
+          setSelectedTokenTotalDeposits((cfg as any)[3] ?? 0n);
+        } catch {
+          setSelectedTokenTotalDeposits(0n);
+        }
+      } else {
+        setSelectedTokenTotalDeposits(0n);
+      }
+
       // User-specific data for each token
       if (address && availableTokens.length > 0) {
         const newStates: Record<string, TokenState> = {};
@@ -518,7 +556,7 @@ export default function AppPage() {
     } catch (err) {
       console.error("Refresh error:", err);
     }
-  }, [configOk, address, availableTokens]);
+  }, [configOk, address, availableTokens, selectedToken]);
 
   const nextDrawUtc = useCallback(() => {
     if (!epochEndTime) return "";
@@ -1130,11 +1168,11 @@ export default function AppPage() {
         )}
 
         {/* Test Controls (only for localhost) */}
-        {mounted && faucetOk && isLocalhost && (
+        {mounted && faucetUiEnabled && (
           <div className="mt-10 rounded-3xl border-2 border-black bg-white p-6 shadow-[8px_8px_0_0_#000]">
-            <div className="text-sm font-black text-zinc-950">Test Mode (localhost only)</div>
+            <div className="text-sm font-black text-zinc-950">Test Mode (testnet/dev)</div>
             <div className="mt-2 text-xs font-semibold text-zinc-700">
-              These controls help you test the app with test tokens.
+              Use the faucet to mint test tokens and simulate yield.
             </div>
             <div className="mt-4 flex flex-wrap gap-3">
               <Button variant="secondary" onClick={mintTestTokens} disabled={loading || !connected || !selectedToken}>
@@ -1164,7 +1202,7 @@ export default function AppPage() {
               </li>
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
-                Weekly draws happen every 7 days from deployment
+                Weekly draws happen Friday 12:00 UTC
               </li>
               <li className="flex gap-3">
                 <span className="text-zinc-950">•</span>
@@ -1181,22 +1219,48 @@ export default function AppPage() {
             <div className="mt-4 space-y-3 text-sm font-semibold">
               <div className="flex items-center justify-between">
                 <span className="text-zinc-800">Total Deposits</span>
-                <span className="font-black text-zinc-950">{formatAmount(totalDeposits, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
+                <span className="font-black text-zinc-950">{formatAmount(selectedTokenTotalDeposits, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-zinc-800">Prize Pool</span>
-                <span className="font-black text-zinc-950">{formatAmount(prizePool, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
+                <span className="font-black text-zinc-950">{formatAmount(currentState?.prizePool ?? 0n, selectedToken?.decimals ?? 18)} {selectedToken?.symbol ?? ''}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-zinc-800">Your Share</span>
                 <span className="font-black text-zinc-950">
-                  {totalDeposits > 0n
-                    ? `${((Number(currentState?.deposits ?? 0n) / Number(totalDeposits)) * 100).toFixed(2)}%`
+                  {selectedTokenTotalDeposits > 0n
+                    ? (() => {
+                        const d = currentState?.deposits ?? 0n;
+                        const bps = (d * 10_000n) / selectedTokenTotalDeposits;
+                        const pctInt = bps / 100n;
+                        const pctFrac = bps % 100n;
+                        return `${pctInt}.${pctFrac.toString().padStart(2, "0")}%`;
+                      })()
                     : "0%"}
                 </span>
               </div>
             </div>
           </div>
+        </div>
+
+        {/* Past Winners */}
+        <div className="mt-10 we-card rounded-3xl border-2 border-black bg-white p-8 shadow-[6px_6px_0_0_#000]">
+          <h3 className="font-display mag-underline text-3xl text-zinc-950">Past Winners (on-chain)</h3>
+          {pastWinners.length === 0 ? (
+            <div className="mt-4 text-sm font-semibold text-zinc-700">No past winners yet (or still loading).</div>
+          ) : (
+            <div className="mt-4 space-y-2 text-sm font-semibold">
+              {pastWinners.map((w) => (
+                <div key={String(w.epochId)} className="flex items-center justify-between rounded-2xl border-2 border-black bg-zinc-50 px-4 py-3">
+                  <div>
+                    <div className="font-black text-zinc-950">Epoch #{w.epochId.toString()}</div>
+                    <div className="text-xs text-zinc-700">Pool #{w.winningPoolId.toString()} • {shortAddr(w.poolCreator)}</div>
+                  </div>
+                  <div className="font-black text-green-700">${formatAmount(w.totalPrizeNormalized, 18)}</div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Footer */}

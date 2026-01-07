@@ -22,6 +22,7 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY;
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "30000");
 const ONCE = process.env.ONCE === "1";
+const MAX_STEPS_PER_RUN = Number(process.env.MAX_STEPS_PER_RUN ?? "5");
 
 const chain = defineChain({
   id: CHAIN_ID,
@@ -56,47 +57,53 @@ const walletClient = createWalletClient({
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function tick() {
-  const epochId = await publicClient.readContract({
-    address: WELOT_VAULT,
-    abi,
-    functionName: "currentEpochId",
-  });
+  for (let step = 0; step < MAX_STEPS_PER_RUN; step++) {
+    const epochId = await publicClient.readContract({
+      address: WELOT_VAULT,
+      abi,
+      functionName: "currentEpochId",
+    });
 
-  const forwarder = await publicClient.readContract({
-    address: WELOT_VAULT,
-    abi,
-    functionName: "automationForwarder",
-  });
+    const forwarder = await publicClient.readContract({
+      address: WELOT_VAULT,
+      abi,
+      functionName: "automationForwarder",
+    });
 
-  const [upkeepNeeded, performData] = await publicClient.readContract({
-    address: WELOT_VAULT,
-    abi,
-    functionName: "checkUpkeep",
-    args: ["0x"],
-  });
+    const [upkeepNeeded, performData] = await publicClient.readContract({
+      address: WELOT_VAULT,
+      abi,
+      functionName: "checkUpkeep",
+      args: ["0x"],
+    });
 
-  console.log(
-    `[keeper] epoch=${epochId.toString()} upkeepNeeded=${upkeepNeeded} ` +
-      `automationForwarder=${forwarder} performData=${performData}`
-  );
+    console.log(
+      `[keeper] step=${step + 1}/${MAX_STEPS_PER_RUN} epoch=${epochId.toString()} ` +
+        `upkeepNeeded=${upkeepNeeded} automationForwarder=${forwarder} performData=${performData}`
+    );
 
-  if (!upkeepNeeded) return;
+    if (!upkeepNeeded) return;
 
-  const txHash = await walletClient.writeContract({
-    address: WELOT_VAULT,
-    abi,
-    functionName: "performUpkeep",
-    args: [performData],
-  });
+    const txHash = await walletClient.writeContract({
+      address: WELOT_VAULT,
+      abi,
+      functionName: "performUpkeep",
+      args: [performData],
+    });
 
-  console.log(`[keeper] sent performUpkeep tx=${txHash}`);
+    console.log(`[keeper] sent performUpkeep tx=${txHash}`);
 
-  const receipt = await publicClient.waitForTransactionReceipt({
-    hash: txHash,
-  });
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: txHash,
+    });
 
-  console.log(
-    `[keeper] confirmed tx=${txHash} status=${receipt.status} block=${receipt.blockNumber}`
+    console.log(
+      `[keeper] confirmed tx=${txHash} status=${receipt.status} block=${receipt.blockNumber}`
+    );
+  }
+
+  console.warn(
+    `[keeper] reached MAX_STEPS_PER_RUN=${MAX_STEPS_PER_RUN}; stopping to avoid infinite loop`
   );
 }
 
@@ -105,7 +112,9 @@ async function main() {
   console.log(`[keeper] vault=${WELOT_VAULT}`);
   console.log(`[keeper] rpc=${RPC_URL}`);
   console.log(`[keeper] chainId=${CHAIN_ID}`);
-  console.log(`[keeper] pollIntervalMs=${POLL_INTERVAL_MS} once=${ONCE}`);
+  console.log(
+    `[keeper] pollIntervalMs=${POLL_INTERVAL_MS} once=${ONCE} maxStepsPerRun=${MAX_STEPS_PER_RUN}`
+  );
 
   while (true) {
     try {

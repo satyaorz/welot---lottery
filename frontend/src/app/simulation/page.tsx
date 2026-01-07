@@ -2,6 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useState, useCallback, useRef } from "react";
+import { getPublicClient } from "../../lib/clients";
+import { welotVaultAbi } from "../../lib/abis";
+import { optionalEnv } from "../../lib/env";
 
 // ════════════════════════════════════════════════════════════════════════════
 // TYPES & CONSTANTS
@@ -346,6 +349,10 @@ export default function SimulationPage() {
   // Epoch starts empty on the server; initialize on client mount to avoid mismatches
   const [epoch, setEpoch] = useState<SimEpoch | null>(null);
   const [epochHistory, setEpochHistory] = useState<SimEpoch[]>([]);
+  const [leaderboard, setLeaderboard] = useState<{ poolId: number; creator: string; totalDeposits: bigint }[]>([]);
+  const [pastWinnersOnChain, setPastWinnersOnChain] = useState<
+    { epochId: number; winningPoolId: number; poolCreator: string; totalPrizeNormalized: bigint; timestamp: number }[]
+  >([]);
 
   // Logs start empty (will be populated on client mount)
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -593,6 +600,66 @@ export default function SimulationPage() {
       runDrawRef.current();
     }
   }, [simTime, epoch]);
+
+  // Fetch on-chain leaderboard & past winners (client-only)
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const vault = optionalEnv("NEXT_PUBLIC_WELOT_VAULT") || (process.env.NEXT_PUBLIC_WELOT_VAULT as string);
+        if (!vault) return;
+        const client = getPublicClient();
+
+        // Leaderboard: read poolIdsLength and each pool
+        const lenBn = await client.readContract({ address: vault as any, abi: welotVaultAbi as any, functionName: "poolIdsLength" }) as unknown as bigint;
+        const len = Number(lenBn || 0);
+        const pools: { poolId: number; creator: string; totalDeposits: bigint }[] = [];
+        for (let i = 0; i < len; i++) {
+          try {
+            const pidBn = await client.readContract({ address: vault as any, abi: welotVaultAbi as any, functionName: "poolIds", args: [BigInt(i)] }) as unknown as bigint;
+            const pid = Number(pidBn);
+            const p = await client.readContract({ address: vault as any, abi: welotVaultAbi as any, functionName: "pools", args: [BigInt(pid)] }) as any;
+            const totalDeposits = (p?.totalDeposits ?? 0n) as bigint;
+            pools.push({ poolId: pid, creator: p?.creator || "", totalDeposits });
+          } catch (e) {
+            // ignore per-pool errors
+          }
+        }
+        pools.sort((a, b) => (a.totalDeposits === b.totalDeposits ? 0 : a.totalDeposits > b.totalDeposits ? -1 : 1));
+        if (mounted) setLeaderboard(pools.slice(0, 5));
+
+        // Past winners: use the on-chain ring buffer
+        try {
+          const rows = (await client.readContract({
+            address: vault as any,
+            abi: welotVaultAbi as any,
+            functionName: "getPastWinners",
+            args: [10n],
+          })) as any[];
+
+          const winners = (rows || [])
+            .filter((r) => r && Number(r.winningPoolId || 0) > 0)
+            .map((r) => ({
+              epochId: Number(r.epochId || 0),
+              winningPoolId: Number(r.winningPoolId || 0),
+              poolCreator: String(r.poolCreator || ""),
+              totalPrizeNormalized: (r.totalPrizeNormalized ?? 0n) as bigint,
+              timestamp: r.timestamp ? Number(r.timestamp) : 0,
+            }));
+
+          if (mounted) setPastWinnersOnChain(winners);
+        } catch {
+          // If the method isn't available (older deployment), silently ignore.
+        }
+      } catch (err) {
+        addLog("system", `On-chain fetch failed: ${(err as Error).message}`);
+      }
+    };
+
+    // Run once after mount
+    setTimeout(load, 200);
+    return () => { mounted = false; };
+  }, [addLog]);
 
   // Actions
   const handleDeposit = (userId: string, tokenSymbol: string, amount: number) => {
@@ -864,6 +931,47 @@ export default function SimulationPage() {
                   When enabled, bot users will randomly deposit and withdraw tokens to simulate real activity.
                 </div>
               </div>
+            </Card>
+
+            {/* Leaderboard (on-chain) */}
+            <Card title="🏆 Leaderboard (on-chain)">
+              {leaderboard.length === 0 ? (
+                <div className="text-zinc-500 text-sm">No pools detected or loading...</div>
+              ) : (
+                <div className="space-y-2 text-sm">
+                  {leaderboard.map((p) => (
+                    <div key={p.poolId} className="flex justify-between items-center">
+                      <div>
+                        <div className="font-bold">Pool #{p.poolId}</div>
+                        <div className="text-zinc-600 text-xs">by {p.creator}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-black text-sm">${formatNumber(Number((p.totalDeposits ?? 0n) / 10n ** 18n))}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+
+            {/* Past winners (on-chain) */}
+            <Card title="📜 Past Winners (on-chain)">
+              {pastWinnersOnChain.length === 0 ? (
+                <div className="text-zinc-500 text-sm">No winners found on-chain (or still loading)</div>
+              ) : (
+                <div className="space-y-2 max-h-48 overflow-y-auto text-sm">
+                  {pastWinnersOnChain.map((w) => (
+                    <div key={w.epochId} className="rounded-lg bg-zinc-100 p-2">
+                      <div className="flex justify-between">
+                        <div className="font-bold">Epoch #{w.epochId}</div>
+                        <div className="text-green-600 font-black">${formatNumber(Number((w.totalPrizeNormalized ?? 0n) / 10n ** 18n))}</div>
+                      </div>
+                      <div className="text-zinc-600 text-xs">Winning Pool #{w.winningPoolId}</div>
+                      {w.poolCreator && <div className="text-zinc-600 text-xs">by {w.poolCreator}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
             </Card>
 
             {/* Epoch History */}
