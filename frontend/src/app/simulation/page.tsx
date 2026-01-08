@@ -2,10 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState, useCallback, useRef } from "react";
-import type { Abi, Address } from "viem";
-import { getPublicClient } from "../../lib/clients";
-import { welotVaultAbi } from "../../lib/abis";
-import { optionalEnv } from "../../lib/env";
+// Note: simulation-only page — no on-chain reads here
 
 // ════════════════════════════════════════════════════════════════════════════
 // TYPES & CONSTANTS
@@ -17,6 +14,7 @@ interface SimUser {
   avatar: string;
   deposits: Record<string, number>;
   claimable: Record<string, number>;
+  poolId: number;
   isYou: boolean;
 }
 
@@ -30,14 +28,22 @@ interface SimToken {
   apy: number;
 }
 
+interface SimPool {
+  id: number;
+  deposits: Record<string, number>; // per-token deposits in this pool
+  // Time-weighted cumulative balance used for pool winner weighting
+  cumulativeWeight: number;
+}
+
 interface SimEpoch {
   id: number;
   start: Date;
   end: Date;
-  status: "open" | "closed" | "pending" | "finalized";
+  status: "open" | "closed" | "randomnessRequested" | "randomnessReady" | "finalized";
   winner: SimUser | null;
   prize: number;
   winningToken: string | null;
+  randomness: number | null;
 }
 
 interface LogEntry {
@@ -95,6 +101,11 @@ function formatMoney(n: number): string {
 
 function formatTime(date: Date): string {
   return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function formatSimDateTimeUTC(date: Date): string {
+  const pad2 = (n: number) => String(n).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())} ${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}:${pad2(date.getUTCSeconds())} UTC`;
 }
 
 function getNextFriday(from: Date): Date {
@@ -172,7 +183,7 @@ function UserRow({ user, tokens, onDeposit, onWithdraw, onClaim }: {
           <span className="text-2xl">{user.avatar}</span>
           <div>
             <div className="font-black text-sm">{user.name} {user.isYou && <span className="text-lime-600">(You)</span>}</div>
-            <div className="text-[10px] text-zinc-500 font-mono">{user.id}</div>
+            <div className="text-[10px] text-zinc-500 font-mono">{user.id} • Pool #{user.poolId}</div>
           </div>
         </div>
         <div className="text-right">
@@ -218,14 +229,16 @@ function EpochStatus({ epoch, simTime }: { epoch: SimEpoch; simTime: Date }) {
   const statusColors = {
     open: "bg-green-400",
     closed: "bg-yellow-400",
-    pending: "bg-orange-400",
+    randomnessRequested: "bg-orange-400",
+    randomnessReady: "bg-sky-400",
     finalized: "bg-blue-400",
   };
 
   const statusText = {
     open: "🟢 OPEN - Accepting Deposits",
-    closed: "🟡 CLOSED - Draw Starting",
-    pending: "🟠 PENDING - Selecting Winner...",
+    closed: "🟡 CLOSED - Ready to Request Randomness",
+    randomnessRequested: "🟠 RANDOMNESS REQUESTED - Waiting for Callback...",
+    randomnessReady: "🔵 RANDOMNESS READY - Finalize Draw",
     finalized: "✅ FINALIZED - Winner Selected!",
   };
 
@@ -332,6 +345,9 @@ export default function SimulationPage() {
   const [autoActions, setAutoActions] = useState(true);
 
   // Users - deterministic initial list to avoid hydration mismatch
+  // Fixed pool size of 5 for the simulation protocol
+  const POOL_COUNT = 5;
+
   const [users, setUsers] = useState<SimUser[]>(() =>
     Array.from({ length: 8 }, (_, i) => ({
       id: `user-${i}`,
@@ -339,8 +355,14 @@ export default function SimulationPage() {
       avatar: AVATARS[i % AVATARS.length],
       deposits: {},
       claimable: {},
+      poolId: i % POOL_COUNT,
       isYou: i === 0,
     }))
+  );
+
+  // Pools: fixed-size array representing protocol pools
+  const [pools, setPools] = useState<SimPool[]>(() =>
+    Array.from({ length: POOL_COUNT }, (_, i) => ({ id: i, deposits: {}, cumulativeWeight: 0 }))
   );
 
   // Tokens & Epochs
@@ -349,10 +371,6 @@ export default function SimulationPage() {
   // Epoch starts empty on the server; initialize on client mount to avoid mismatches
   const [epoch, setEpoch] = useState<SimEpoch | null>(null);
   const [epochHistory, setEpochHistory] = useState<SimEpoch[]>([]);
-  const [leaderboard, setLeaderboard] = useState<{ poolId: number; totalDeposits: bigint }[]>([]);
-  const [pastWinnersOnChain, setPastWinnersOnChain] = useState<
-    { epochId: number; winningPoolId: number; totalPrizeNormalized: bigint; timestamp: number }[]
-  >([]);
 
   // Logs start empty (will be populated on client mount)
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -389,6 +407,7 @@ export default function SimulationPage() {
         winner: null,
         prize: 0,
         winningToken: null,
+        randomness: null,
       });
       setLogs([
         { id: randomId(), time: now, type: "system", message: "🎮 Simulation started! This is a web2 demo - no real transactions." },
@@ -398,6 +417,7 @@ export default function SimulationPage() {
   }, []);
 
   // Accrue yield helper (seconds is number of elapsed seconds)
+  // Protocol model: yield accrues globally per token; the draw allocates that prize to a winning pool.
   const accrueYield = useCallback((seconds: number) => {
     if (seconds <= 0) return;
     setTokens((prev) =>
@@ -407,7 +427,18 @@ export default function SimulationPage() {
         return { ...token, prizePool: token.prizePool + yieldGenerated };
       })
     );
-  }, [setTokens]);
+  }, []);
+
+  // Time-weighted pool weighting (approx): integrate pool total deposits over time
+  const accruePoolWeights = useCallback((seconds: number) => {
+    if (seconds <= 0) return;
+    setPools((prev) =>
+      prev.map((p) => {
+        const balance = Object.values(p.deposits).reduce((a, b) => a + b, 0);
+        return { ...p, cumulativeWeight: p.cumulativeWeight + balance * seconds };
+      })
+    );
+  }, []);
 
   // Time simulation tick
   useEffect(() => {
@@ -418,10 +449,12 @@ export default function SimulationPage() {
       setSimTime((prev) => new Date(prev.getTime() + timeSpeed * 1000));
       // Accrue yield according to the advanced time (timeSpeed seconds)
       accrueYield(timeSpeed);
+      // Accrue pool weights for pool winner selection
+      accruePoolWeights(timeSpeed);
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [isRunning, timeSpeed, accrueYield]);
+  }, [isRunning, timeSpeed, accrueYield, accruePoolWeights]);
 
   // Random bot actions
   useEffect(() => {
@@ -444,9 +477,14 @@ export default function SimulationPage() {
           const amount = Math.floor(Math.random() * 500) + 50;
           addLog("deposit", `${botUser.name} deposited $${amount} ${token.symbol}`, botUser.id);
           
-          setTokens((t) =>
-            t.map((tk) =>
-              tk.symbol === token.symbol ? { ...tk, totalDeposits: tk.totalDeposits + amount } : tk
+          setTokens((t) => t.map((tk) => (tk.symbol === token.symbol ? { ...tk, totalDeposits: tk.totalDeposits + amount } : tk)));
+
+          // update pool totals
+          setPools((prev) =>
+            prev.map((p) =>
+              p.id === botUser.poolId
+                ? { ...p, deposits: { ...p.deposits, [token.symbol]: (p.deposits[token.symbol] || 0) + amount } }
+                : p
             )
           );
 
@@ -462,9 +500,14 @@ export default function SimulationPage() {
           const amount = Math.min(deposited, Math.floor(Math.random() * 200) + 10);
           addLog("withdraw", `${botUser.name} withdrew $${amount} ${token.symbol}`, botUser.id);
           
-          setTokens((t) =>
-            t.map((tk) =>
-              tk.symbol === token.symbol ? { ...tk, totalDeposits: Math.max(0, tk.totalDeposits - amount) } : tk
+          setTokens((t) => t.map((tk) => (tk.symbol === token.symbol ? { ...tk, totalDeposits: Math.max(0, tk.totalDeposits - amount) } : tk)));
+
+          // reduce from pool totals
+          setPools((prev) =>
+            prev.map((p) =>
+              p.id === botUser.poolId
+                ? { ...p, deposits: { ...p.deposits, [token.symbol]: Math.max(0, (p.deposits[token.symbol] || 0) - amount) } }
+                : p
             )
           );
 
@@ -483,82 +526,146 @@ export default function SimulationPage() {
   }, [isRunning, autoActions, timeSpeed, tokens, addLog]);
 
   // Draw functions using refs to avoid circular dependency
-  const runDrawRef = useRef<() => void>(() => {});
+  const closeEpochRef = useRef<() => void>(() => {});
+  const requestRandomnessRef = useRef<() => void>(() => {});
+  const finalizeDrawRef = useRef<() => void>(() => {});
   const startNewEpochRef = useRef<() => void>(() => {});
 
   // Keep refs updated with latest state (must be in useEffect, not render)
   useEffect(() => {
-    runDrawRef.current = () => {
+    closeEpochRef.current = () => {
       if (!epoch) return;
+      if (epoch.status !== "open") return;
 
-      // Phase 1: Close epoch
-      addLog("draw", "Epoch closed. Starting draw process...");
+      addLog("draw", "Epoch closed. Keeper step: closeEpoch()");
       setEpoch((e) => (e ? { ...e, status: "closed" } : null));
+    };
 
-      setTimeout(() => {
-        // Phase 2: Request randomness
-        addLog("draw", "Requesting randomness from Pyth Entropy... 🎲");
-        setEpoch((e) => (e ? { ...e, status: "pending" } : null));
-      }, 1000);
+    requestRandomnessRef.current = () => {
+      if (!epoch) return;
+      if (epoch.status !== "closed") return;
 
+      addLog("draw", "Keeper step: requestRandomness() via Pyth Entropy 🎲");
+      setEpoch((e) => (e ? { ...e, status: "randomnessRequested" } : null));
+
+      // Simulate async entropy callback
       setTimeout(() => {
-        // Phase 3: Select winner
-        const eligibleUsers = users.filter((u) => Object.values(u.deposits).some((d) => d > 0));
-        
-        if (eligibleUsers.length === 0) {
-          addLog("system", "No eligible participants. Starting new epoch.");
+        const r = Math.random();
+        addLog("draw", "Entropy callback received ✅");
+        setEpoch((e) => (e ? { ...e, status: "randomnessReady", randomness: r } : null));
+      }, 1200);
+    };
+
+    finalizeDrawRef.current = () => {
+      if (!epoch) return;
+      if (epoch.status !== "randomnessReady") return;
+
+      // Finalize draw: select winning pool + allocate prizes
+      setTimeout(() => {
+        // Select winning pool (protocol selects a pool, not a single user)
+        const eligiblePools = pools
+          .map((p) => ({
+            pool: p,
+            totalDeposits: Object.values(p.deposits).reduce((a, b) => a + b, 0),
+          }))
+          .filter((p) => p.totalDeposits > 0);
+
+        if (eligiblePools.length === 0) {
+          addLog("system", "No eligible deposits in any pool. Starting new epoch.");
           startNewEpochRef.current();
           return;
         }
 
-        // Weight by total deposits
-        const weights = eligibleUsers.map((u) => ({
-          user: u,
-          weight: Object.values(u.deposits).reduce((a, b) => a + b, 0),
-        }));
-        const totalWeight = weights.reduce((a, b) => a + b.weight, 0);
+        // Weight pools by time-weighted cumulative weight; fall back to current balance if all weights are 0
+        const totalCumulative = eligiblePools.reduce((a, b) => a + (b.pool.cumulativeWeight || 0), 0);
+        const totalWeight = totalCumulative > 0
+          ? totalCumulative
+          : eligiblePools.reduce((a, b) => a + b.totalDeposits, 0);
 
-        let random = Math.random() * totalWeight;
-        let winner = eligibleUsers[0];
-        for (const w of weights) {
-          random -= w.weight;
+        // Use epoch randomness if available; fallback to Math.random
+        const rand01 = epoch.randomness ?? Math.random();
+        let random = rand01 * totalWeight;
+        let winningPoolId = eligiblePools[0].pool.id;
+        for (const p of eligiblePools) {
+          const w = totalCumulative > 0 ? (p.pool.cumulativeWeight || 0) : p.totalDeposits;
+          random -= w;
           if (random <= 0) {
-            winner = w.user;
+            winningPoolId = p.pool.id;
             break;
           }
         }
 
-        // Calculate total prize
-        const totalPrize = tokens.reduce((a, b) => a + b.prizePool, 0);
-        const winningToken = tokens.reduce((a, b) => (b.prizePool > a.prizePool ? b : a)).symbol;
+        // Allocate prizes: for each token, allocate the *global* prize pool to depositors of that token inside the winning pool.
+        const winningPool = pools.find((p) => p.id === winningPoolId);
 
-        addLog("winner", `🏆 ${winner.name} won $${formatNumber(totalPrize)}! Random selection complete.`);
+        const allocatableByToken = new Map<string, { prize: number; poolTokenDeposits: number }>();
+        for (const t of tokens) {
+          const poolTokenDeposits = winningPool?.deposits[t.symbol] || 0;
+          if (t.prizePool > 0 && poolTokenDeposits > 0) {
+            allocatableByToken.set(t.symbol, { prize: t.prizePool, poolTokenDeposits });
+          }
+        }
 
-        // Distribute prizes
-        setUsers((prev) =>
-          prev.map((u) => {
-            if (u.id !== winner.id) return u;
-            const newClaimable = { ...u.claimable };
-            tokens.forEach((t) => {
-              if (t.prizePool > 0) {
-                newClaimable[t.symbol] = (newClaimable[t.symbol] || 0) + t.prizePool;
+        let totalPrizeAllocated = 0;
+        let winningToken: string | null = null;
+        let maxTokenPrize = 0;
+        for (const [symbol, a] of allocatableByToken.entries()) {
+          totalPrizeAllocated += a.prize;
+          if (a.prize > maxTokenPrize) {
+            maxTokenPrize = a.prize;
+            winningToken = symbol;
+          }
+        }
+
+        // Update users claimable amounts (pro-rata within winning pool, per token)
+        if (allocatableByToken.size > 0) {
+          setUsers((prev) =>
+            prev.map((u) => {
+              if (u.poolId !== winningPoolId) return u;
+              const newClaimable = { ...u.claimable };
+              for (const [symbol, a] of allocatableByToken.entries()) {
+                const userDep = u.deposits[symbol] || 0;
+                if (userDep <= 0) continue;
+                const share = a.prize * (userDep / a.poolTokenDeposits);
+                newClaimable[symbol] = (newClaimable[symbol] || 0) + share;
               }
-            });
-            return { ...u, claimable: newClaimable };
-          })
+              return { ...u, claimable: newClaimable };
+            })
+          );
+        }
+
+        // Reduce token prize pools only for tokens that were allocatable in the winning pool
+        if (allocatableByToken.size > 0) {
+          setTokens((prev) =>
+            prev.map((t) => (allocatableByToken.has(t.symbol) ? { ...t, prizePool: 0 } : t))
+          );
+        }
+
+        addLog(
+          "winner",
+          allocatableByToken.size === 0
+            ? `🏆 Pool #${winningPoolId} won, but had no deposits in prize-bearing tokens — prizes carry forward.`
+            : `🏆 Pool #${winningPoolId} won $${formatNumber(totalPrizeAllocated)} in prizes!`
         );
 
-        // Reset prize pools
-        setTokens((prev) => prev.map((t) => ({ ...t, prizePool: 0 })));
+        // Update epoch (store pool as a pseudo-winner for display)
+        const poolWinner: SimUser = {
+          id: `pool-${winningPoolId}`,
+          name: `Pool #${winningPoolId}`,
+          avatar: "🏊",
+          deposits: {},
+          claimable: {},
+          poolId: winningPoolId,
+          isYou: false,
+        };
 
-        // Update epoch
         setEpoch((e) =>
           e
             ? {
                 ...e,
                 status: "finalized",
-                winner,
-                prize: totalPrize,
+                winner: poolWinner,
+                prize: totalPrizeAllocated,
                 winningToken,
               }
             : null
@@ -568,13 +675,16 @@ export default function SimulationPage() {
         setTimeout(() => {
           startNewEpochRef.current();
         }, 5000);
-      }, 2000);
+      }, 250);
     };
 
     startNewEpochRef.current = () => {
       if (epoch) {
         setEpochHistory((prev) => [epoch, ...prev.slice(0, 9)]);
       }
+
+      // Reset time-weighted pool weights for the new epoch (protocol weights are epoch-scoped)
+      setPools((prev) => prev.map((p) => ({ ...p, cumulativeWeight: 0 })));
 
       const nextDraw = getNextFriday(simTime);
       const newEpoch: SimEpoch = {
@@ -585,113 +695,27 @@ export default function SimulationPage() {
         winner: null,
         prize: 0,
         winningToken: null,
+        randomness: null,
       };
 
       setEpoch(newEpoch);
       addLog("system", `New epoch #${newEpoch.id} started! Draw at ${nextDraw.toLocaleString()}`);
     };
-  }, [epoch, users, tokens, simTime, addLog]);
+  }, [epoch, users, tokens, pools, simTime, addLog]);
 
   // Check for draw time
   useEffect(() => {
     if (!epoch || epoch.status !== "open") return;
 
     if (simTime >= epoch.end) {
-      runDrawRef.current();
+      closeEpochRef.current();
+      // Auto-advance keeper steps for the simulation
+      setTimeout(() => requestRandomnessRef.current(), 300);
+      setTimeout(() => finalizeDrawRef.current(), 2000);
     }
   }, [simTime, epoch]);
 
-  // Fetch on-chain leaderboard & past winners (client-only)
-  useEffect(() => {
-    let mounted = true;
-    const load = async () => {
-      try {
-        const vault = optionalEnv("NEXT_PUBLIC_WELOT_VAULT") || (process.env.NEXT_PUBLIC_WELOT_VAULT as string);
-        if (!vault) return;
-        const vaultAddress = vault as Address;
-        const client = getPublicClient();
-        const abi = welotVaultAbi as Abi;
-
-        const toNumber = (v: unknown): number => {
-          if (typeof v === "bigint") return Number(v);
-          if (typeof v === "number") return v;
-          if (typeof v === "string") return Number(v);
-          return Number(v ?? 0);
-        };
-
-        // Leaderboard: read poolIdsLength and each pool
-        const lenBn = (await client.readContract({
-          address: vaultAddress,
-          abi,
-          functionName: "poolIdsLength",
-        })) as unknown as bigint;
-        const len = Number(lenBn || 0);
-        const pools: { poolId: number; totalDeposits: bigint }[] = [];
-        for (let i = 0; i < len; i++) {
-          try {
-            const pidBn = (await client.readContract({
-              address: vaultAddress,
-              abi,
-              functionName: "poolIds",
-              args: [BigInt(i)],
-            })) as unknown as bigint;
-            const pid = Number(pidBn);
-            const pUnknown = await client.readContract({
-              address: vaultAddress,
-              abi,
-              functionName: "pools",
-              args: [BigInt(pid)],
-            });
-            const p = (pUnknown ?? {}) as Record<string, unknown>;
-            const totalDeposits = typeof p.totalDeposits === "bigint" ? p.totalDeposits : 0n;
-            pools.push({ poolId: pid, totalDeposits });
-          } catch (e) {
-            // ignore per-pool errors
-          }
-        }
-        pools.sort((a, b) => (a.totalDeposits === b.totalDeposits ? 0 : a.totalDeposits > b.totalDeposits ? -1 : 1));
-        if (mounted) setLeaderboard(pools.slice(0, 5));
-
-        // Past winners: use the on-chain ring buffer
-        try {
-          const rowsUnknown = await client.readContract({
-            address: vaultAddress,
-            abi,
-            functionName: "getPastWinners",
-            args: [10n],
-          });
-
-          const rows = Array.isArray(rowsUnknown) ? (rowsUnknown as unknown[]) : [];
-
-          const winners = rows
-            .map((r) => (r && typeof r === "object" ? (r as Record<string, unknown>) : null))
-            .filter((r): r is Record<string, unknown> => Boolean(r) && toNumber(r?.winningPoolId) > 0)
-            .map((r) => {
-              const totalPrizeNormalized = typeof r.totalPrizeNormalized === "bigint" ? r.totalPrizeNormalized : 0n;
-              const ts = r.timestamp;
-              const timestamp = typeof ts === "bigint" ? Number(ts) : typeof ts === "number" ? ts : 0;
-
-              return {
-                epochId: toNumber(r.epochId),
-                winningPoolId: toNumber(r.winningPoolId),
-                totalPrizeNormalized,
-                timestamp,
-              };
-            });
-
-          if (mounted) setPastWinnersOnChain(winners);
-        } catch {
-          // If the method isn't available (older deployment), silently ignore.
-        }
-      } catch (err) {
-        addLog("system", `On-chain fetch failed: ${(err as Error).message}`);
-      }
-    };
-
-    // Run once after mount
-    setTimeout(load, 200);
-    return () => { mounted = false; };
-  }, [addLog]);
+  // Simulation-only: leaderboard and past winners are derived from in-memory pools/epochHistory
 
   // Actions
   const handleDeposit = (userId: string, tokenSymbol: string, amount: number) => {
@@ -708,6 +732,13 @@ export default function SimulationPage() {
 
     setTokens((prev) =>
       prev.map((t) => (t.symbol === tokenSymbol ? { ...t, totalDeposits: t.totalDeposits + amount } : t))
+    );
+
+    // update pool totals for this user's assigned pool
+    setPools((prev) =>
+      prev.map((p) =>
+        p.id === user.poolId ? { ...p, deposits: { ...p.deposits, [tokenSymbol]: (p.deposits[tokenSymbol] || 0) + amount } } : p
+      )
     );
 
     addLog("deposit", `${user.name} deposited $${amount} ${tokenSymbol}`, userId);
@@ -730,6 +761,13 @@ export default function SimulationPage() {
 
     setTokens((prev) =>
       prev.map((t) => (t.symbol === tokenSymbol ? { ...t, totalDeposits: Math.max(0, t.totalDeposits - amount) } : t))
+    );
+
+    // reduce pool totals for user's pool
+    setPools((prev) =>
+      prev.map((p) =>
+        p.id === user.poolId ? { ...p, deposits: { ...p.deposits, [tokenSymbol]: Math.max(0, (p.deposits[tokenSymbol] || 0) - amount) } } : p
+      )
     );
 
     addLog("withdraw", `${user.name} withdrew $${amount} ${tokenSymbol}`, userId);
@@ -756,6 +794,7 @@ export default function SimulationPage() {
       avatar: randomAvatar(),
       deposits: {},
       claimable: {},
+      poolId: users.length % POOL_COUNT,
       isYou: false,
     };
     setUsers((prev) => [...prev, newUser]);
@@ -769,20 +808,39 @@ export default function SimulationPage() {
 
     // Accrue yield for the jumped period
     accrueYield(seconds);
+    // Accrue pool weights for the jumped period
+    accruePoolWeights(seconds);
 
     addLog("system", `⏩ Time warped forward ${seconds >= 3600 ? `${seconds / 3600}h` : seconds >= 60 ? `${seconds / 60}m` : `${seconds}s`}`);
 
     // If we've moved past the epoch end, trigger the draw immediately
     if (epoch && epoch.status === "open" && newTime >= epoch.end) {
       // small timeout to allow state updates to flush
-      setTimeout(() => runDrawRef.current(), 50);
+      setTimeout(() => {
+        closeEpochRef.current();
+        setTimeout(() => requestRandomnessRef.current(), 300);
+        setTimeout(() => finalizeDrawRef.current(), 2000);
+      }, 50);
     }
   };
 
   const triggerManualDraw = () => {
-    if (epoch?.status === "open") {
-      addLog("system", "Manual draw triggered!");
-      runDrawRef.current();
+    if (!epoch) return;
+    // Manual keeper step: advance one stage in the lifecycle
+    if (epoch.status === "open") {
+      addLog("system", "Manual keeper: closeEpoch()");
+      closeEpochRef.current();
+      return;
+    }
+    if (epoch.status === "closed") {
+      addLog("system", "Manual keeper: requestRandomness()");
+      requestRandomnessRef.current();
+      return;
+    }
+    if (epoch.status === "randomnessReady") {
+      addLog("system", "Manual keeper: finalizeDraw()");
+      finalizeDrawRef.current();
+      return;
     }
   };
 
@@ -820,7 +878,7 @@ export default function SimulationPage() {
                 <div className="grid md:grid-cols-3 gap-4 text-sm">
                   <div>
                     <div className="font-bold mb-1">🎯 The Lottery</div>
-                    <p className="text-zinc-600">Users deposit tokens → yield accrues → winner takes the prize pool. Your deposits are always safe!</p>
+                    <p className="text-zinc-600">Users deposit tokens → deposits go into their assigned pool → yield accrues globally → a winning pool is selected and prizes are distributed pro-rata inside that pool.</p>
                   </div>
                   <div>
                     <div className="font-bold mb-1">⏱️ Time Controls</div>
@@ -895,7 +953,7 @@ export default function SimulationPage() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <div className="text-sm text-zinc-600">Simulation Time</div>
-                  <div className="font-mono font-bold">{simTime.toLocaleString()}</div>
+                  <div className="font-mono font-bold">{formatSimDateTimeUTC(simTime)}</div>
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -940,9 +998,9 @@ export default function SimulationPage() {
                   variant="primary" 
                   size="sm" 
                   onClick={triggerManualDraw}
-                  disabled={epoch?.status !== "open"}
+                  disabled={!(epoch?.status === "open" || epoch?.status === "closed" || epoch?.status === "randomnessReady")}
                 >
-                  🎰 Trigger Draw Now
+                  🎰 Run Keeper Step
                 </Button>
               </div>
             </Card>
@@ -965,41 +1023,51 @@ export default function SimulationPage() {
               </div>
             </Card>
 
-            {/* Leaderboard (on-chain) */}
-            <Card title="🏆 Leaderboard (on-chain)">
-              {leaderboard.length === 0 ? (
-                <div className="text-zinc-500 text-sm">No pools detected or loading...</div>
+            {/* Leaderboard (simulated pools) */}
+            <Card title="🏆 Leaderboard (simulated)">
+              {pools.length === 0 ? (
+                <div className="text-zinc-500 text-sm">No pools available</div>
               ) : (
                 <div className="space-y-2 text-sm">
-                  {leaderboard.map((p) => (
-                    <div key={p.poolId} className="flex justify-between items-center">
-                      <div>
-                        <div className="font-bold">Pool #{p.poolId}</div>
+                  {pools
+                    .map((p) => ({
+                      id: p.id,
+                      total: Object.values(p.deposits).reduce((a, b) => a + b, 0),
+                    }))
+                    .sort((a, b) => b.total - a.total)
+                    .slice(0, 5)
+                    .map((p) => (
+                      <div key={p.id} className="flex justify-between items-center">
+                        <div>
+                          <div className="font-bold">Pool #{p.id}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-black text-sm">${formatNumber(p.total)}</div>
+                        </div>
                       </div>
-                      <div className="text-right">
-                        <div className="font-black text-sm">${formatNumber(Number((p.totalDeposits ?? 0n) / 10n ** 18n))}</div>
-                      </div>
-                    </div>
-                  ))}
+                    ))}
                 </div>
               )}
             </Card>
 
-            {/* Past winners (on-chain) */}
-            <Card title="📜 Past Winners (on-chain)">
-              {pastWinnersOnChain.length === 0 ? (
-                <div className="text-zinc-500 text-sm">No winners found on-chain (or still loading)</div>
+            {/* Past winners (simulated from epoch history) */}
+            <Card title="📜 Past Winners (simulated)">
+              {epochHistory.filter((e) => e.winner).length === 0 ? (
+                <div className="text-zinc-500 text-sm">No winners yet in this simulation</div>
               ) : (
                 <div className="space-y-2 max-h-48 overflow-y-auto text-sm">
-                  {pastWinnersOnChain.map((w) => (
-                    <div key={w.epochId} className="rounded-lg bg-zinc-100 p-2">
-                      <div className="flex justify-between">
-                        <div className="font-bold">Epoch #{w.epochId}</div>
-                        <div className="text-green-600 font-black">${formatNumber(Number((w.totalPrizeNormalized ?? 0n) / 10n ** 18n))}</div>
+                  {epochHistory
+                    .filter((e) => e.winner)
+                    .slice(0, 10)
+                    .map((e) => (
+                      <div key={e.id} className="rounded-lg bg-zinc-100 p-2">
+                        <div className="flex justify-between">
+                          <div className="font-bold">Epoch #{e.id}</div>
+                          <div className="text-green-600 font-black">${formatNumber(e.prize)}</div>
+                        </div>
+                        <div className="text-zinc-600 text-xs">Winner: {e.winner?.avatar} {e.winner?.name} (Pool #{e.winner?.poolId})</div>
                       </div>
-                      <div className="text-zinc-600 text-xs">Winning Pool #{w.winningPoolId}</div>
-                    </div>
-                  ))}
+                    ))}
                 </div>
               )}
             </Card>
