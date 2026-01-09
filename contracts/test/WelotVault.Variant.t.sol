@@ -180,7 +180,7 @@ contract WelotVaultVariantTest is Test {
         vm.warp(end - 1);
         
         // Should NOT be able to close
-        vm.expectRevert(WelotVault.DrawNotReady.selector);
+        vm.expectRevert(WelotVault.WelotVault__DrawNotReady.selector);
         vault.closeEpoch();
     }
 
@@ -196,7 +196,7 @@ contract WelotVaultVariantTest is Test {
 
         // Trying to deposit to wrong pool should fail
         vm.prank(alice);
-        vm.expectRevert(WelotVault.InvalidAssignedPool.selector);
+        vm.expectRevert(WelotVault.WelotVault__InvalidAssignedPool.selector);
         vault.depositTo(address(usdc), 100e6, 50, alice);
     }
 

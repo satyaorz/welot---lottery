@@ -144,18 +144,22 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     // ERRORS
     // ══════════════════════════════════════════════════════════════════════════════
 
-    error PoolDoesNotExist();
-    error MaxPoolsReached();
-    error InvalidEpochState();
-    error DrawNotReady();
-    error ZeroAmount();
-    error InsufficientBalance();
-    error NotAutomationForwarder();
-    error TokenNotSupported();
-    error TokenAlreadySupported();
-    error InvalidToken();
-    error InsufficientFee();
-    error InvalidAssignedPool();
+    error WelotVault__InvalidEntropy();
+    error WelotVault__InvalidDrawInterval();
+    error WelotVault__HasDeposits();
+
+    error WelotVault__PoolDoesNotExist();
+    error WelotVault__MaxPoolsReached();
+    error WelotVault__InvalidEpochState();
+    error WelotVault__DrawNotReady();
+    error WelotVault__ZeroAmount();
+    error WelotVault__InsufficientBalance();
+    error WelotVault__NotAutomationForwarder();
+    error WelotVault__TokenNotSupported();
+    error WelotVault__TokenAlreadySupported();
+    error WelotVault__InvalidToken();
+    error WelotVault__InsufficientFee();
+    error WelotVault__InvalidAssignedPool();
 
     // ══════════════════════════════════════════════════════════════════════════════
     // CONSTRUCTOR
@@ -166,8 +170,8 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         uint64 drawIntervalSeconds_,
         uint256 maxPools_
     ) Ownable(msg.sender) {
-        require(address(entropy_) != address(0), "Invalid entropy");
-        require(drawIntervalSeconds_ > 0, "Invalid draw interval");
+        if (address(entropy_) == address(0)) revert WelotVault__InvalidEntropy();
+        if (drawIntervalSeconds_ == 0) revert WelotVault__InvalidDrawInterval();
 
         entropy = entropy_;
         drawInterval = drawIntervalSeconds_;
@@ -202,9 +206,9 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     /// @param token The ERC20 token address
     /// @param yieldVault The ERC4626 vault that generates yield
     function addSupportedToken(address token, IERC4626 yieldVault) external onlyOwner {
-        if (token == address(0)) revert InvalidToken();
-        if (tokenConfigs[token].enabled) revert TokenAlreadySupported();
-        if (address(yieldVault.asset()) != token) revert InvalidToken();
+        if (token == address(0)) revert WelotVault__InvalidToken();
+        if (tokenConfigs[token].enabled) revert WelotVault__TokenAlreadySupported();
+        if (address(yieldVault.asset()) != token) revert WelotVault__InvalidToken();
 
         // Get decimals from token
         (bool success, bytes memory data) = token.staticcall(abi.encodeWithSignature("decimals()"));
@@ -229,8 +233,8 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     /// @notice Remove a supported token (only if no deposits)
     function removeSupportedToken(address token) external onlyOwner {
         TokenConfig storage config = tokenConfigs[token];
-        if (!config.enabled) revert TokenNotSupported();
-        require(config.totalDeposits == 0, "Has deposits");
+        if (!config.enabled) revert WelotVault__TokenNotSupported();
+        if (config.totalDeposits != 0) revert WelotVault__HasDeposits();
 
         config.enabled = false;
 
@@ -477,13 +481,13 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     function depositTo(address token, uint256 amount, uint256 poolId, address recipient) 
         public nonReentrant whenNotPaused 
     {
-        if (amount == 0) revert ZeroAmount();
+        if (amount == 0) revert WelotVault__ZeroAmount();
         uint256 assigned = assignedPoolId(recipient);
-        if (poolId != assigned) revert InvalidAssignedPool();
-        if (!pools[poolId].exists) revert PoolDoesNotExist();
+        if (poolId != assigned) revert WelotVault__InvalidAssignedPool();
+        if (!pools[poolId].exists) revert WelotVault__PoolDoesNotExist();
         
         TokenConfig storage config = tokenConfigs[token];
-        if (!config.enabled) revert TokenNotSupported();
+        if (!config.enabled) revert WelotVault__TokenNotSupported();
 
         _updateUserRewards(token, poolId, recipient);
 
@@ -512,18 +516,18 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     /// @notice Withdraw tokens from a specific pool
     function withdrawFrom(address token, uint256 amount, uint256 poolId) public nonReentrant {
-        if (amount == 0) revert ZeroAmount();
+        if (amount == 0) revert WelotVault__ZeroAmount();
         uint256 assigned = assignedPoolId(msg.sender);
-        if (poolId != assigned) revert InvalidAssignedPool();
-        if (!pools[poolId].exists) revert PoolDoesNotExist();
+        if (poolId != assigned) revert WelotVault__InvalidAssignedPool();
+        if (!pools[poolId].exists) revert WelotVault__PoolDoesNotExist();
 
         TokenConfig storage config = tokenConfigs[token];
-        if (!config.enabled) revert TokenNotSupported();
+        if (!config.enabled) revert WelotVault__TokenNotSupported();
 
         _updateUserRewards(token, poolId, msg.sender);
 
         UserPosition storage pos = positions[token][poolId][msg.sender];
-        if (pos.deposits < amount) revert InsufficientBalance();
+        if (pos.deposits < amount) revert WelotVault__InsufficientBalance();
 
         pos.deposits -= amount;
 
@@ -549,11 +553,11 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     /// @notice Claim prize from a specific pool
     function claimPrizeFrom(address token, uint256 poolId) public nonReentrant returns (uint256 prize) {
         uint256 assigned = assignedPoolId(msg.sender);
-        if (poolId != assigned) revert InvalidAssignedPool();
-        if (!pools[poolId].exists) revert PoolDoesNotExist();
+        if (poolId != assigned) revert WelotVault__InvalidAssignedPool();
+        if (!pools[poolId].exists) revert WelotVault__PoolDoesNotExist();
 
         TokenConfig storage config = tokenConfigs[token];
-        if (!config.enabled) revert TokenNotSupported();
+        if (!config.enabled) revert WelotVault__TokenNotSupported();
 
         _updateUserRewards(token, poolId, msg.sender);
 
@@ -594,9 +598,9 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
         return (false, "");
     }
 
-    function performUpkeep(bytes calldata performData) external {
+    function performUpkeep(bytes calldata performData) external nonReentrant {
         if (automationForwarder != address(0) && msg.sender != automationForwarder) {
-            revert NotAutomationForwarder();
+            revert WelotVault__NotAutomationForwarder();
         }
 
         uint8 action = abi.decode(performData, (uint8));
@@ -614,22 +618,22 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     // DRAW LIFECYCLE
     // ══════════════════════════════════════════════════════════════════════════════
 
-    function closeEpoch() external {
+    function closeEpoch() external nonReentrant {
         _closeEpoch();
     }
 
-    function requestRandomness() external payable {
+    function requestRandomness() external payable nonReentrant {
         _requestRandomness();
     }
 
-    function finalizeDraw() external {
+    function finalizeDraw() external nonReentrant {
         _finalizeDraw();
     }
 
     function _closeEpoch() internal {
         Epoch storage e = epochs[currentEpochId];
-        if (e.status != EpochStatus.Open) revert InvalidEpochState();
-        if (block.timestamp < e.end) revert DrawNotReady();
+        if (e.status != EpochStatus.Open) revert WelotVault__InvalidEpochState();
+        if (block.timestamp < e.end) revert WelotVault__DrawNotReady();
 
         e.status = EpochStatus.Closed;
         _accrueAllPools();
@@ -639,10 +643,10 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     function _requestRandomness() internal {
         Epoch storage e = epochs[currentEpochId];
-        if (e.status != EpochStatus.Closed) revert InvalidEpochState();
+        if (e.status != EpochStatus.Closed) revert WelotVault__InvalidEpochState();
 
         uint256 fee = entropy.getFeeV2();
-        if (address(this).balance < fee) revert InsufficientFee();
+        if (address(this).balance < fee) revert WelotVault__InsufficientFee();
 
         uint64 sequenceNumber = entropy.requestV2{value: fee}();
 
@@ -671,7 +675,7 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
 
     function _finalizeDraw() internal {
         Epoch storage e = epochs[currentEpochId];
-        if (e.status != EpochStatus.RandomnessReady) revert DrawNotReady();
+        if (e.status != EpochStatus.RandomnessReady) revert WelotVault__DrawNotReady();
 
         _accrueAllPools();
 
@@ -737,7 +741,7 @@ contract WelotVault is ReentrancyGuard, Pausable, Ownable, IEntropyConsumer {
     // ══════════════════════════════════════════════════════════════════════════════
 
     function _createPool() internal returns (uint256 poolId) {
-        if (poolIds.length >= maxPools) revert MaxPoolsReached();
+        if (poolIds.length >= maxPools) revert WelotVault__MaxPoolsReached();
 
         poolId = ++poolCount;
         pools[poolId] = Pool({

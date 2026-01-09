@@ -8,6 +8,8 @@ contract MockEntropyV2 is IEntropyV2 {
     uint256 public fee;
     uint64 public nextSeq;
 
+    error MockEntropyV2__NoRequest();
+
     mapping(uint64 => address) public requester;
 
     constructor() {
@@ -35,7 +37,7 @@ contract MockEntropyV2 is IEntropyV2 {
     /// @notice Simulate fulfillment (call this from tests)
     function fulfill(uint64 sequenceNumber, bytes32 random) external {
         address target = requester[sequenceNumber];
-        require(target != address(0), "NO_REQ");
+        if (target == address(0)) revert MockEntropyV2__NoRequest();
         IEntropyConsumer(target).entropyCallback(sequenceNumber, address(this), random);
     }
 

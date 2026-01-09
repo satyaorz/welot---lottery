@@ -25,11 +25,15 @@ contract MockAToken is ERC20 {
     mapping(address => uint256) private _scaledBalances;
     uint256 private _scaledTotalSupply;
 
-    constructor(IERC20 _underlyingAsset, string memory name, string memory symbol)
+    error MockAToken__OnlyPool();
+    error MockAToken__NonTransferable();
+    error MockAToken__NoApprovalNeeded();
+
+    constructor(IERC20 _underlyingAsset, address _pool, string memory name, string memory symbol)
         ERC20(name, symbol)
     {
         underlyingAsset = _underlyingAsset;
-        pool = msg.sender;
+        pool = _pool;
         lastUpdateTimestamp = block.timestamp;
     }
 
@@ -57,6 +61,11 @@ contract MockAToken is ERC20 {
         _scaledTotalSupply -= scaledAmount;
 
         emit Transfer(user, address(0), amount);
+    }
+
+    /// @notice Transfer underlying out of the aToken contract (called by pool on withdraw)
+    function transferUnderlyingTo(address to, uint256 amount) external onlyPool {
+        underlyingAsset.safeTransfer(to, amount);
     }
 
     /// @notice Get the balance of a user (scaled balance * liquidity index)
@@ -100,11 +109,27 @@ contract MockAToken is ERC20 {
         uint256 timeElapsed = block.timestamp - lastUpdateTimestamp;
         if (timeElapsed == 0) return;
 
+        uint256 oldIndex = liquidityIndex;
+        uint256 oldTotal = _rayMul(_scaledTotalSupply, oldIndex);
+
         // Calculate linear interest: index *= (1 + APY * timeElapsed / SECONDS_PER_YEAR)
         // Simplified for testing: assume 365 days = 31536000 seconds
         uint256 interest = _rayMul(supplyAPY, (timeElapsed * 1e27) / 31536000);
-        liquidityIndex = _rayMul(liquidityIndex, 1e27 + interest);
+        uint256 newIndex = _rayMul(oldIndex, 1e27 + interest);
+        liquidityIndex = newIndex;
         lastUpdateTimestamp = block.timestamp;
+
+        // Best-effort backing of accrued interest by minting underlying to this contract.
+        // Works with `MockERC20` and any underlying that exposes `mint(address,uint256)`.
+        uint256 newTotal = _rayMul(_scaledTotalSupply, newIndex);
+        uint256 delta = newTotal > oldTotal ? newTotal - oldTotal : 0;
+        if (delta > 0) {
+            // Ignore failure for non-mintable underlyings.
+            (bool ok,) = address(underlyingAsset).call(
+                abi.encodeWithSignature("mint(address,uint256)", address(this), delta)
+            );
+            ok;
+        }
     }
 
     function _getCurrentIndex() internal view returns (uint256) {
@@ -128,21 +153,21 @@ contract MockAToken is ERC20 {
     // ========== MODIFIERS ==========
 
     modifier onlyPool() {
-        require(msg.sender == pool, "Only pool");
+        if (msg.sender != pool) revert MockAToken__OnlyPool();
         _;
     }
 
     // ========== OVERRIDES (disable transfers for simplicity) ==========
 
     function transfer(address, uint256) public pure override returns (bool) {
-        revert("aTokens are non-transferable");
+        revert MockAToken__NonTransferable();
     }
 
     function transferFrom(address, address, uint256) public pure override returns (bool) {
-        revert("aTokens are non-transferable");
+        revert MockAToken__NonTransferable();
     }
 
     function approve(address, uint256) public pure override returns (bool) {
-        revert("aTokens don't need approval");
+        revert MockAToken__NoApprovalNeeded();
     }
 }

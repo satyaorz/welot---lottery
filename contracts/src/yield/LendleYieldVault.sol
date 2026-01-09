@@ -12,6 +12,10 @@ import "../interfaces/ILendlePool.sol";
 contract LendleYieldVault is ERC4626 {
     using SafeERC20 for IERC20;
 
+    error LendleYieldVault__ZeroPoolAddress();
+    error LendleYieldVault__ZeroATokenAddress();
+    error LendleYieldVault__WithdrawAmountMismatch();
+
     /// @notice The Lendle lending pool contract
     ILendlePool public immutable lendlePool;
 
@@ -37,8 +41,8 @@ contract LendleYieldVault is ERC4626 {
         string memory _name,
         string memory _symbol
     ) ERC4626(_asset) ERC20(_name, _symbol) {
-        require(address(_lendlePool) != address(0), "LendleYieldVault: zero pool address");
-        require(address(_aToken) != address(0), "LendleYieldVault: zero aToken address");
+        if (address(_lendlePool) == address(0)) revert LendleYieldVault__ZeroPoolAddress();
+        if (address(_aToken) == address(0)) revert LendleYieldVault__ZeroATokenAddress();
 
         lendlePool = _lendlePool;
         aToken = _aToken;
@@ -128,7 +132,7 @@ contract LendleYieldVault is ERC4626 {
         uint256 withdrawn = lendlePool.withdraw(asset(), assets, receiver);
 
         // Ensure we withdrew the expected amount
-        require(withdrawn == assets, "LendleYieldVault: withdraw amount mismatch");
+        if (withdrawn != assets) revert LendleYieldVault__WithdrawAmountMismatch();
 
         emit Withdraw(caller, receiver, owner, assets, shares);
         emit WithdrawnFromLendle(withdrawn);

@@ -22,6 +22,11 @@ import {ILendlePool} from "../src/interfaces/ILendlePool.sol";
 /// @notice Deploys WelotVault to Mantle Network (USDC/USDT only with Lendle)
 /// @dev Uses real Lendle addresses for mainnet, mocks for testnet
 contract DeployMantleScript is Script {
+    error DeployMantleScript__UnsupportedNetwork();
+    error DeployMantleScript__EthSendFailed();
+    error DeployMantleScript__LendleAUsdcMainnetNotSet();
+    error DeployMantleScript__LendleAUsdtMainnetNotSet();
+
     // ═══════════════════════════════════════════════════════════════════
     // MANTLE MAINNET ADDRESSES
     // ═══════════════════════════════════════════════════════════════════
@@ -66,7 +71,7 @@ contract DeployMantleScript is Script {
         bool isMainnet = block.chainid == 5000;
         bool isTestnet = block.chainid == 5003;
         
-        require(isMainnet || isTestnet, "Unsupported network");
+        if (!(isMainnet || isTestnet)) revert DeployMantleScript__UnsupportedNetwork();
         vm.startBroadcast();
 
         // Entropy address (allow override via env)
@@ -90,9 +95,9 @@ contract DeployMantleScript is Script {
             // Deploy mock Lendle Pool
             lendlePool = new MockLendlePool();
 
-            // Deploy mock aTokens
-            aUSDC = new MockAToken(IERC20(address(usdc)), "Aave USDC", "aUSDC");
-            aUSDT = new MockAToken(IERC20(address(usdt)), "Aave USDT", "aUSDT");
+            // Deploy mock aTokens (pass pool address so aToken.onlyPool matches)
+            aUSDC = new MockAToken(IERC20(address(usdc)), address(lendlePool), "Aave USDC", "aUSDC");
+            aUSDT = new MockAToken(IERC20(address(usdt)), address(lendlePool), "Aave USDT", "aUSDT");
 
             // Initialize reserves with realistic APYs
             lendlePool.initReserve(address(usdc), address(aUSDC), 0.12e27); // 12% APY
@@ -147,8 +152,8 @@ contract DeployMantleScript is Script {
         // Add supported tokens
         if (isMainnet) {
             // Mainnet: Deploy real Lendle vaults (only if aToken addresses configured)
-            require(LENDLE_aUSDC_MAINNET != address(0), "LENDLE_aUSDC_MAINNET not set");
-            require(LENDLE_aUSDT_MAINNET != address(0), "LENDLE_aUSDT_MAINNET not set");
+            if (LENDLE_aUSDC_MAINNET == address(0)) revert DeployMantleScript__LendleAUsdcMainnetNotSet();
+            if (LENDLE_aUSDT_MAINNET == address(0)) revert DeployMantleScript__LendleAUsdtMainnetNotSet();
 
             usdcVault = new LendleYieldVault(
                 IERC20(USDC_MAINNET),
@@ -176,8 +181,8 @@ contract DeployMantleScript is Script {
         }
 
         // Fund vault with ETH for Entropy fees
-        (bool sent,) = address(vault).call{value: 0.1 ether}("");
-        require(sent, "ETH send failed");
+        (bool sent,) = address(vault).call{value: 1 ether}("");
+        if (!sent) revert DeployMantleScript__EthSendFailed();
 
         vm.stopBroadcast();
 

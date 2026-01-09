@@ -15,6 +15,8 @@ import {MockEntropyV2} from "../src/mocks/MockEntropyV2.sol";
 /// - MOCK_ENTROPY (optional, bool; defaults to true)
 /// - RANDOM_WORD (optional, uint256; defaults to 1)
 contract RunDrawScript is Script {
+    error RunDrawScript__NeedSeq();
+
     function run() external {
         address vaultAddr = vm.envAddress("WELOT_VAULT");
         address entropyAddr = vm.envAddress("ENTROPY");
@@ -53,7 +55,7 @@ contract RunDrawScript is Script {
 
         if (seq == 0) {
             uint256 forcedSeq = vm.envOr("RANDOM_SEQ", uint256(0));
-            require(forcedSeq != 0, "Need seq: set RANDOM_SEQ env");
+            if (forcedSeq == 0) revert RunDrawScript__NeedSeq();
             seq = uint64(forcedSeq);
         }
 

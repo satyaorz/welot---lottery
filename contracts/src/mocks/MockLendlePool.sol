@@ -12,6 +12,10 @@ import {MockAToken} from "./MockAToken.sol";
 contract MockLendlePool is ILendlePool {
     using SafeERC20 for IERC20;
 
+    error MockLendlePool__ReserveNotActive();
+    error MockLendlePool__InsufficientATokenBalance();
+    error MockLendlePool__InsufficientLiquidity();
+
     struct Reserve {
         address aTokenAddress;
         uint128 liquidityRate;
@@ -63,7 +67,7 @@ contract MockLendlePool is ILendlePool {
         uint16 referralCode
     ) external override {
         Reserve memory reserve = reserves[asset];
-        require(reserve.isActive, "Reserve not active");
+        if (!reserve.isActive) revert MockLendlePool__ReserveNotActive();
 
         // Transfer underlying asset from user to aToken contract
         IERC20(asset).safeTransferFrom(msg.sender, reserve.aTokenAddress, amount);
@@ -85,7 +89,7 @@ contract MockLendlePool is ILendlePool {
         address to
     ) external override returns (uint256) {
         Reserve memory reserve = reserves[asset];
-        require(reserve.isActive, "Reserve not active");
+        if (!reserve.isActive) revert MockLendlePool__ReserveNotActive();
 
         MockAToken aToken = MockAToken(reserve.aTokenAddress);
 
@@ -93,17 +97,17 @@ contract MockLendlePool is ILendlePool {
         uint256 userBalance = aToken.balanceOf(msg.sender);
         uint256 amountToWithdraw = amount == type(uint256).max ? userBalance : amount;
 
-        require(amountToWithdraw <= userBalance, "Insufficient aToken balance");
+        if (amountToWithdraw > userBalance) revert MockLendlePool__InsufficientATokenBalance();
 
         // Check available liquidity
         uint256 availableLiquidity = IERC20(asset).balanceOf(reserve.aTokenAddress);
-        require(amountToWithdraw <= availableLiquidity, "Insufficient liquidity");
+        if (amountToWithdraw > availableLiquidity) revert MockLendlePool__InsufficientLiquidity();
 
         // Burn aTokens from user
         aToken.burn(msg.sender, amountToWithdraw);
 
-        // Transfer underlying asset to user
-        IERC20(asset).safeTransferFrom(reserve.aTokenAddress, to, amountToWithdraw);
+        // Transfer underlying asset to user (must be executed by aToken contract)
+        aToken.transferUnderlyingTo(to, amountToWithdraw);
 
         emit Withdraw(asset, msg.sender, to, amountToWithdraw);
 
@@ -149,7 +153,7 @@ contract MockLendlePool is ILendlePool {
     /// @param asset The address of the underlying asset
     function simulateYieldAccrual(address asset) external {
         Reserve memory reserve = reserves[asset];
-        require(reserve.isActive, "Reserve not active");
+        if (!reserve.isActive) revert MockLendlePool__ReserveNotActive();
         
         MockAToken(reserve.aTokenAddress).updateIndex();
     }

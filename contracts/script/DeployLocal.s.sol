@@ -19,6 +19,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 /// @notice Deploys the full welot stack for local testing on Anvil
 /// @dev Uses MockLendlePool and MockAToken to simulate Lendle behavior
 contract DeployLocalScript is Script {
+    error DeployLocalScript__EthSendFailed();
+
     function run() external {
         vm.startBroadcast();
 
@@ -29,9 +31,9 @@ contract DeployLocalScript is Script {
         // Deploy mock Lendle Pool
         MockLendlePool lendlePool = new MockLendlePool();
 
-        // Deploy mock aTokens
-        MockAToken aUSDC = new MockAToken(IERC20(address(usdc)), "Aave USDC", "aUSDC");
-        MockAToken aUSDT = new MockAToken(IERC20(address(usdt)), "Aave USDT", "aUSDT");
+        // Deploy mock aTokens (pass pool address so aToken.onlyPool matches)
+        MockAToken aUSDC = new MockAToken(IERC20(address(usdc)), address(lendlePool), "Aave USDC", "aUSDC");
+        MockAToken aUSDT = new MockAToken(IERC20(address(usdt)), address(lendlePool), "Aave USDT", "aUSDT");
 
         // Initialize reserves with APYs (12% for USDC, 5% for USDT)
         lendlePool.initReserve(address(usdc), address(aUSDC), 0.12e27); // 12% APY
@@ -79,7 +81,7 @@ contract DeployLocalScript is Script {
 
         // Fund the vault with some ETH for Entropy fees
         (bool sent,) = address(vault).call{value: 0.1 ether}("");
-        require(sent, "ETH send failed");
+        if (!sent) revert DeployLocalScript__EthSendFailed();
 
         vm.stopBroadcast();
 

@@ -24,12 +24,12 @@ contract MockFaucet {
     /// @notice Owner for admin functions
     address public owner;
 
-    error NotOwner();
-    error TokenNotRegistered();
-    error ClaimCooldown();
+    error MockFaucet__NotOwner();
+    error MockFaucet__TokenNotRegistered();
+    error MockFaucet__ClaimCooldown();
 
     modifier onlyOwner() {
-        if (msg.sender != owner) revert NotOwner();
+        if (msg.sender != owner) revert MockFaucet__NotOwner();
         _;
     }
 
@@ -55,15 +55,15 @@ contract MockFaucet {
     /// @notice Claim tokens
     /// @param token The token address to claim
     function claim(address token) external {
-        if (!isToken[token]) revert TokenNotRegistered();
+        if (!isToken[token]) revert MockFaucet__TokenNotRegistered();
         
         if (cooldown > 0) {
             if (block.timestamp < lastClaim[msg.sender][token] + cooldown) {
-                revert ClaimCooldown();
+                revert MockFaucet__ClaimCooldown();
             }
         } else {
             // One-time claim
-            if (lastClaim[msg.sender][token] > 0) revert ClaimCooldown();
+            if (lastClaim[msg.sender][token] > 0) revert MockFaucet__ClaimCooldown();
         }
 
         lastClaim[msg.sender][token] = block.timestamp;

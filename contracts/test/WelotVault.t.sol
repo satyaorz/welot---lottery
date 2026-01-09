@@ -109,13 +109,13 @@ contract WelotVaultTest is Test {
         MockERC20 fake = new MockERC20("FAKE", "FAKE", 6);
         
         vm.prank(alice);
-        vm.expectRevert(WelotVault.TokenNotSupported.selector);
+        vm.expectRevert(WelotVault.WelotVault__TokenNotSupported.selector);
         vault.deposit(address(fake), 100e6);
     }
 
     function test_Deposit_ZeroAmount() public {
         vm.prank(alice);
-        vm.expectRevert(WelotVault.ZeroAmount.selector);
+        vm.expectRevert(WelotVault.WelotVault__ZeroAmount.selector);
         vault.deposit(address(usdc), 0);
     }
 
@@ -147,7 +147,7 @@ contract WelotVaultTest is Test {
     function test_Withdraw_ExceedsBalance() public {
         vm.startPrank(alice);
         vault.deposit(address(usdc), 100e6);
-        vm.expectRevert(WelotVault.InsufficientBalance.selector);
+        vm.expectRevert(WelotVault.WelotVault__InsufficientBalance.selector);
         vault.withdraw(address(usdc), 150e6);
         vm.stopPrank();
     }
@@ -158,7 +158,7 @@ contract WelotVaultTest is Test {
 
     function test_CloseEpoch_NotReady() public {
         // Epoch just started, should not be closeable
-        vm.expectRevert(WelotVault.DrawNotReady.selector);
+        vm.expectRevert(WelotVault.WelotVault__DrawNotReady.selector);
         vault.closeEpoch();
     }
 
