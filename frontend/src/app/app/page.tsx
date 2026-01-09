@@ -711,7 +711,7 @@ export default function AppPage() {
   }
 
   async function withdraw() {
-    if (!connected || !address || !configOk || !withdrawAmount || !selectedToken) return;
+    if (!connected || !address || !selectedToken?.vaultAddress) return;
     setLoading(true);
     setError("");
 
@@ -720,29 +720,22 @@ export default function AppPage() {
       if (!eth) return;
       const publicClient = getPublicClient();
       const walletClient = getWalletClient(eth);
-      const amount = withdrawParsed;
-      if (amount === null || amount === 0n) {
-        setError("Enter a valid withdraw amount");
-        return;
-      }
+      const amount = parseUnits("50", selectedToken.decimals);
 
-      if ((currentState?.deposits ?? 0n) < amount) {
-        setError(`Insufficient deposited ${selectedToken.symbol} to withdraw that amount.`);
-        return;
-      }
-
-      const hash = await walletClient.writeContract({
-        address: CONFIG.vaultAddress!,
-        abi: welotVaultAbi,
-        functionName: "withdraw",
-        args: [selectedToken.address, amount],
+      // Simple donate: instruct the vault to pull tokens via `donateYield`.
+      // This intentionally does not perform claim/approve fallback here —
+      // calling wallet will require the user to have tokens and have approved the vault.
+      const donateHash = await walletClient.writeContract({
+        address: selectedToken.vaultAddress,
+        abi: mockErc4626FaucetAbi,
+        functionName: "donateYield",
+        args: [amount],
         account: address,
       });
 
-      await publicClient.waitForTransactionReceipt({ hash });
+      await publicClient.waitForTransactionReceipt({ hash: donateHash });
 
-      setWithdrawAmount("");
-      setSuccess(`Withdrew ${withdrawAmount} ${selectedToken.symbol}!`);
+      setSuccess(`Donated 50 ${selectedToken.symbol} to yield vault!`);
       await refresh();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -1110,26 +1103,24 @@ export default function AppPage() {
                 />
               </div>
               <div className="flex gap-3">
-                {needsApproval ? (
-                  <Button onClick={approve} disabled={loading || !connected} fullWidth>
-                    {loading ? "Approving..." : `Approve ${selectedToken?.symbol ?? ''}`}
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={deposit}
-                    disabled={
-                      loading ||
-                      !connected ||
-                      !depositAmount ||
-                      depositParsed === null ||
-                      depositParsed === 0n ||
-                      insufficientBalance
-                    }
-                    fullWidth
-                  >
-                    {loading ? "Depositing..." : "Deposit"}
-                  </Button>
-                )}
+                <Button onClick={approve} disabled={loading || !connected} variant="secondary">
+                  {loading ? "Approving..." : `Approve ${selectedToken?.symbol ?? ''}`}
+                </Button>
+
+                <Button
+                  onClick={deposit}
+                  disabled={
+                    loading ||
+                    !connected ||
+                    !depositAmount ||
+                    depositParsed === null ||
+                    depositParsed === 0n ||
+                    insufficientBalance ||
+                    needsApproval
+                  }
+                >
+                  {loading ? "Depositing..." : "Deposit"}
+                </Button>
               </div>
             </div>
           </ActionCard>
