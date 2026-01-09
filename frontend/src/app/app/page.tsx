@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import type { Address, EIP1193Provider } from "viem";
 import { formatUnits, maxUint256, parseUnits } from "viem";
 
-import { erc20Abi, faucetAbi, mockErc4626FaucetAbi, welotVaultAbi } from "@/lib/abis";
+import { erc20Abi, faucetAbi, welotVaultAbi } from "@/lib/abis";
 import { getPublicClient, getWalletClient, shortAddr } from "@/lib/clients";
 import { CONFIG, getConfiguredTokens, type TokenInfo } from "@/lib/config";
 import { getChain } from "@/lib/chains";
@@ -711,7 +711,7 @@ export default function AppPage() {
   }
 
   async function withdraw() {
-    if (!connected || !address || !selectedToken?.vaultAddress) return;
+    if (!connected || !address || !configOk || !withdrawAmount || !selectedToken) return;
     setLoading(true);
     setError("");
 
@@ -720,22 +720,29 @@ export default function AppPage() {
       if (!eth) return;
       const publicClient = getPublicClient();
       const walletClient = getWalletClient(eth);
-      const amount = parseUnits("50", selectedToken.decimals);
+      const amount = withdrawParsed;
+      if (amount === null || amount === 0n) {
+        setError("Enter a valid withdraw amount");
+        return;
+      }
 
-      // Simple donate: instruct the vault to pull tokens via `donateYield`.
-      // This intentionally does not perform claim/approve fallback here —
-      // calling wallet will require the user to have tokens and have approved the vault.
-      const donateHash = await walletClient.writeContract({
-        address: selectedToken.vaultAddress,
-        abi: mockErc4626FaucetAbi,
-        functionName: "donateYield",
-        args: [amount],
+      if ((currentState?.deposits ?? 0n) < amount) {
+        setError(`Insufficient deposited ${selectedToken.symbol} to withdraw that amount.`);
+        return;
+      }
+
+      const hash = await walletClient.writeContract({
+        address: CONFIG.vaultAddress!,
+        abi: welotVaultAbi,
+        functionName: "withdraw",
+        args: [selectedToken.address, amount],
         account: address,
       });
 
-      await publicClient.waitForTransactionReceipt({ hash: donateHash });
+      await publicClient.waitForTransactionReceipt({ hash });
 
-      setSuccess(`Donated 50 ${selectedToken.symbol} to yield vault!`);
+      setWithdrawAmount("");
+      setSuccess(`Withdrew ${withdrawAmount} ${selectedToken.symbol}!`);
       await refresh();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -828,40 +835,6 @@ export default function AppPage() {
       await publicClient.waitForTransactionReceipt({ hash });
 
       setSuccess("Claimed all available test tokens!");
-      await refresh();
-    } catch (err) {
-      setError(getErrorMessage(err));
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function simulateYield() {
-    if (!connected || !address || !selectedToken?.vaultAddress) return;
-    setLoading(true);
-    setError("");
-
-    try {
-      const eth = requireWalletProvider();
-      if (!eth) return;
-      const publicClient = getPublicClient();
-      const walletClient = getWalletClient(eth);
-      const amount = parseUnits("50", selectedToken.decimals);
-
-      // No-approve donate: send tokens directly to the yield vault address.
-      // This works against real deployments (no mock-only functions required).
-      const txHash = await walletClient.writeContract({
-        address: selectedToken.address,
-        abi: erc20Abi,
-        functionName: "transfer",
-        args: [selectedToken.vaultAddress, amount],
-        account: address,
-      });
-
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-      setSuccess(`Sent 50 ${selectedToken.symbol} to yield vault!`);
       await refresh();
     } catch (err) {
       setError(getErrorMessage(err));
@@ -1187,9 +1160,6 @@ export default function AppPage() {
               </Button>
               <Button variant="secondary" onClick={mintAllTestTokens} disabled={loading || !connected}>
                 Claim All Tokens
-              </Button>
-              <Button variant="secondary" onClick={simulateYield} disabled={loading || !connected}>
-                Simulate Yield (+50)
               </Button>
               <Button variant="ghost" onClick={() => void refresh()}>
                 Refresh Data
