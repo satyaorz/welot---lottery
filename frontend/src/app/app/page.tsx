@@ -849,19 +849,19 @@ export default function AppPage() {
       const walletClient = getWalletClient(eth);
       const amount = parseUnits("50", selectedToken.decimals);
 
-      // Local mock: mint yield directly into the vault so prize pool increases without
-      // requiring the user to donate tokens.
-      const yieldHash = await walletClient.writeContract({
-        address: selectedToken.vaultAddress,
-        abi: mockErc4626FaucetAbi,
-        functionName: "simulateYield",
-        args: [amount],
+      // No-approve donate: send tokens directly to the yield vault address.
+      // This works against real deployments (no mock-only functions required).
+      const txHash = await walletClient.writeContract({
+        address: selectedToken.address,
+        abi: erc20Abi,
+        functionName: "transfer",
+        args: [selectedToken.vaultAddress, amount],
         account: address,
       });
 
-      await publicClient.waitForTransactionReceipt({ hash: yieldHash });
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-      setSuccess(`Simulated 50 ${selectedToken.symbol} yield!`);
+      setSuccess(`Sent 50 ${selectedToken.symbol} to yield vault!`);
       await refresh();
     } catch (err) {
       setError(getErrorMessage(err));
