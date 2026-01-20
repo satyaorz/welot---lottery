@@ -34,6 +34,19 @@ This README focuses on protocol understanding and high-level behavior first. Set
 - Randomness is provided asynchronously by Entropy V2 (requestV2 / entropyCallback).
 - Pools are fixed and users are deterministically assigned to a pool at deployment.
 
+### addresses on mantle testent
+NEXT_PUBLIC_CHAIN_ID=5003
+NEXT_PUBLIC_RPC_URL=
+
+NEXT_PUBLIC_WELOT_VAULT=0x3A43e42cE9Fa6318C167C506112de9082BdDF703 (main)
+NEXT_PUBLIC_ENTROPY=0x98046Bd286715D3B0BC227Dd7a956b83D8978603
+NEXT_PUBLIC_FAUCET=0x3182189E8aA11778e9761679a77215eF3deB4b19
+
+NEXT_PUBLIC_USDC=0xFD2a64348c829Da9e9CE3f688910909ecF6F384A
+NEXT_PUBLIC_SUSDC=0x9fc2a8a2F28478f7575bF13E854f61699439EF70
+NEXT_PUBLIC_USDT=0x53779f445FBCFB52A9bA5aC246969d2D2902b710
+NEXT_PUBLIC_SUSDT=0x384F87AC9e01ab2bF061474771f1B06b4922F38d
+
 ## Docs
 
 - `PROTOCOL.md` — protocol/contract behavior (authoritative)
